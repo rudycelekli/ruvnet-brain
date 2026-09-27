@@ -13,8 +13,16 @@ const REPO = 'stuinfla/ruvnet-brain';
 const PACKAGE = 'ruvnet-brain';
 export const ASSET_DOWNLOAD_TIMEOUT_MS = Number(process.env.RUVNET_RELEASE_ASSET_TIMEOUT_MS || 600_000);
 
+// maxBuffer: execFileSync defaults to 1MB, which this helper never overrode. `refresh()` below
+// slurps EVERY release's metadata (`releases?per_page=100 --paginate --slurp`) through it, and by
+// 2026-09-27 the accumulated release history (many releases, several now carrying 14-15 chained
+// transaction receipts as assets each) finally crossed that ceiling — same shape of bug as #77
+// (spawnSync gh ENOBUFS), just at the metadata-listing call site instead of the asset-download one.
+// 32MB matches the buffer already used for JSON metadata elsewhere in this codebase (e.g.
+// release-abort-stale.mjs's artifact fetch) and costs nothing: no call through this helper handles
+// raw asset bytes (those stream to disk via assetToFile), only ever-growing-but-still-small JSON.
 const command = (name, args, options = {}) => execFileSync(name, args, {
-  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, ...options,
+  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: 32 * 1024 * 1024, ...options,
 }).trim();
 const json = (name, args, options) => JSON.parse(command(name, args, options));
 // ADR-086 S1: `releases/latest` is the customer download pointer and is a corpus generation on any
