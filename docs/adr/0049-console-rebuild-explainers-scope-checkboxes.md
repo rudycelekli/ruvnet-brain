@@ -3,8 +3,9 @@ id: ADR-049
 title: The console rebuild — explain every section, scope every suggestion, and make the safe ones checkable
 status: Accepted
 date: 2026-07-24
-updated: 2026-09-12
-reviewed_digest: bbcfde973786
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 9f5c0ce4d4a0
 authors: [Stuart Kerr, Claude Code]
 tags: [onboarding, ux, console, advocacy, capability, cache, honesty]
 supersedes: []
@@ -131,6 +132,7 @@ project the data is about. A cross-project isolation test proves it, mutation-ch
   precisely the failure ADR-055 was written to end, found by the drift check rather than by a reader.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: same onboarding-console.mjs learner-scope fix, plus unrelated bin/install.mjs release-pipeline fixes (macOS deadline, serverDependencies parsing, corpus-currency). No explainer/scope/checkbox logic touched. | Reviewed `console/app.js`, `scripts/console-engine.mjs`, `scripts/onboarding-console.mjs`, `plugin/scripts/runtime-preferences.mjs`, `scripts/nightly-controller.mjs`, `bin/install.mjs` against the commits listed above; reviewed_digest 9f5c0ce4d4a0. |
 | 2026-09-12 | Currency review at commit 491ea740: decision unchanged. `40d8c16b` moved the release-provenance card out of the end-user flow into a closed maintainer `<details>` and added Newest/A–Z/Behind-first views + description search to the scope page — both extend this ADR's console-scope decision rather than contradict it. `5f919c52` (`bin/install.mjs`) added `placeTrustedCoverageValidator()`, unrelated to console UI/scope; read in full, no capability-checkbox or explainer logic touched. | Reviewed `console/app.js`, `scripts/console-engine.mjs`, `scripts/onboarding-console.mjs`, `plugin/scripts/runtime-preferences.mjs`, `scripts/nightly-controller.mjs`, `bin/install.mjs` against commits `40d8c16b` and `5f919c52`; both diffs read in full. |
 
 | 2026-09-11 | Currency review at commit 7296c984: decision unchanged. Motion since a5584de3 on this ADR's paths: the seven console card fixes (`c98b64d5` … `ec85ac68`, itemised in ADR-0013's row) and `8747d2f8` in `scripts/onboarding-console.mjs` / `console/app.js` — every card now renders measured state with its section explainer intact; the scope page (ADR-0069, merged `1f956632`) adds `gatherScope` to `onboarding-console.mjs`. `scripts/console-engine.mjs` did not move today (its plain-node test `scripts/console-engine.test.mjs`, not governed here, was updated at `e03454a0` to the stronger invariant the `6a6ba72f` engine already enforced — no recommendation without a currently available inverse — which this ADR's info-bubble decision does not touch). `bin/install.mjs` `dc18fadc` (retention wording) and the pre-session worktree merge `2c24ecd1` are outside this ADR's concern; `plugin/scripts/runtime-preferences.mjs` and `scripts/nightly-controller.mjs` did not move. | Reviewed `console/app.js`, `scripts/console-engine.mjs`, `scripts/onboarding-console.mjs`; cross-checked ADR-0069. reviewed_digest bbcfde973786. |

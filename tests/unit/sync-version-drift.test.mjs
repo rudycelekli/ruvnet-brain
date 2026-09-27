@@ -36,8 +36,8 @@ import { readExplainerBadgeVersion, writeExplainerBadgeVersion, hasSplitVersionL
 describe('sync-version.mjs explainer status label', () => {
   it('reads and rewrites the single product-version label', () => {
     const label = '&middot; v4.3.27</p>';
-    expect(readExplainerBadgeVersion(label)).toBe('4.3.27');
-    expect(writeExplainerBadgeVersion(label, '4.3.28')).toBe('&middot; v4.3.28</p>');
+    expect(readExplainerBadgeVersion(label)).toBe('4.3.27'); // sync-version-ignore: arbitrary fixture input for a regex parser, not the repo's actual shipped version
+    expect(writeExplainerBadgeVersion(label, '4.3.28')).toBe('&middot; v4.3.28</p>'); // sync-version-ignore: arbitrary fixture input for a regex parser, not the repo's actual shipped version
   });
 
   it('recognizes the product version when a public npm version follows it', () => {

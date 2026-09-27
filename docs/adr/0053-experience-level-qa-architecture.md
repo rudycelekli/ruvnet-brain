@@ -3,9 +3,10 @@ id: ADR-053
 title: Experience-level QA — test the journey a user actually has, on every host, OS, and install path
 status: Accepted
 date: 2026-07-26
-updated: 2026-09-11
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.1.1
-reviewed_digest: a366894a3c4c
+reviewed_digest: b49b737eabfc
 authors: [Stuart Kerr, Claude Code]
 tags: [qa, testing, experience, cross-platform, codex, agentic-qe, ci]
 supersedes: []
@@ -14,7 +15,7 @@ governs:
   - tests/experience/*.json
   - tests/experience/*.mjs
   - .github/workflows/ci.yml
-  - .github/workflows/qe-4-3.yml
+  - .github/workflows/ux-qe.yml
   - scripts/qe/*.mjs
   - tests/ux/*.mjs
 ---
@@ -22,6 +23,7 @@ governs:
 # ADR-053: Experience-level QA
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. RECONCILED (real drift, not just re-review): governs: named .github/workflows/qe-4-3.yml, deleted at commit 40166baf ("collapse check-only mode onto the one CI-enforced qualification gate") as legacy/manual-only, with its behavior superseded by .github/workflows/ux-qe.yml (already passing repeatedly in this session's CI). governs: updated to point at ux-qe.yml. Other motion since last review (release-pipeline CI hardening, QE gate consolidation) does not change the architecture. | Reviewed `tests/experience/scenarios.json`, `tests/experience/report.mjs`, `tests/experience/report.test.mjs`, `.github/workflows/ci.yml`, `.github/workflows/ux-qe.yml`, `scripts/qe/agentic-qe-4.3.mjs` against the commits listed above; reviewed_digest b49b737eabfc. |
 | 2026-09-11 | Currency review at commit 2eef2024: decision unchanged. Both drift commits (`0edb270d`, `987a3571`) add only CI environment-variable wiring to `.github/workflows/ci.yml` (absolute module-resolution paths for the bundled embedder, so the worker and warm-up probe resolve identical bytes from an immutable seed) — no scenario, lane, or gate logic changed. | Reviewed both diffs directly (5 and 8 line additions, `.github/workflows/ci.yml` only). reviewed_digest a366894a3c4c. |
 | 2026-09-09 | Reviewed the experience scenario and CI contract after the North Star D2/D1 repairs; the 24-scenario report and the exact REQUIRE_BRAIN lane remain aligned with this decision. | Source digest a5aa86ebf57b; tests/experience/scenarios.json; tests/experience/report.mjs; .github/workflows/ci.yml. |
 | 2026-09-07 | Reviewed full macOS unit qualification and reconciled public verification ordering with ADR-072; source digest 951b7750a27a. | `.github/workflows/ci.yml`; exact-SHA hosted and public results remain pending. |

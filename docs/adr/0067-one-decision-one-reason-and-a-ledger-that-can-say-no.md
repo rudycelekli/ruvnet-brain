@@ -2,8 +2,10 @@
 id: ADR-067
 title: One decision, one reason — and a ledger that can report bad news
 status: Accepted
+reviewed_digest: ecd9518d306e
 date: 2026-08-10
-updated: 2026-09-12
+updated: 2026-09-27
+updated_source: derived-from-git
 authors: [Stuart Kerr, Claude Code]
 tags: [hooks, architecture, enforcement, measurement, simplification]
 supersedes: []
@@ -122,6 +124,7 @@ by name, most because they duplicate a native or global lesson and a second copy
   as surfaced for coverage and never scored.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: decision-gate.mjs's dead-route removal and two new hooks.json entries for capacity-aware parallel work. The one-decision-one-reason ledger mechanism is unchanged; dead-code removal only. | Reviewed `plugin/scripts/decision-gate.mjs`, `plugin/scripts/decision-outcomes.mjs`, `plugin/scripts/degradation-watch.mjs`, `plugin/scripts/identifier-preflight.mjs`, `plugin/scripts/adr-currency-gate.mjs`, `plugin/scripts/mcp-readiness.mjs` against the commits listed above; reviewed_digest ecd9518d306e. |
 
 | Date | What changed | Why (with referents) |
 |---|---|---|
