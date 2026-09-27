@@ -93,6 +93,7 @@ const checks = [
         ['scripts/goldie-research.mjs', 'family prefix match against the live catalog'],
         ['scripts/routing-flywheel.mjs', 'comment example of id normalisation'],
         ['scripts/proxy/proxy-verify.mjs', 'standalone ADR-0026 proxy trial tool (wired-check exempt)'],
+        ['scripts/model-router-engine.mjs', 'owner: built-in catalog fallback for when ~/.claude/model-router/catalog.json is absent'],
       ]);
       const files = tracked.filter((f) => /^(scripts|plugin|bin|kb)\/.+\.mjs$/.test(f) && !allowed.has(f) && re.test(read(f)));
       return none(files);
@@ -201,7 +202,7 @@ const checks = [
     run: () => { const s = readAbs(path.join(HOME, '.claude/settings.json')); return { ok: !/agentdb-autocapture/.test(s), detail: /agentdb-autocapture/.test(s) ? 'global agentdb-autocapture still registered alongside the plugin session-snapshot' : 'single writer' }; } },
 
   { id: 'E3', area: 'hooks', scope: 'machine', title: 'Lessons live in one store (no .swarm lesson-* rows outside the plugin lesson store)',
-    run: () => { const r = spawnSync('ruflo', ['memory', 'list', '--path', path.join(HOME, 'Code/ruvnet-brain/.swarm/memory.db'), '--limit', '500'], { encoding: 'utf8', timeout: 60000 });
+    run: () => { const r = spawnSync('ruflo', ['memory', 'list', '--path', path.join(HOME, 'Code/ruvnet-brain/.swarm/memory.db'), '--limit', '500'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, RUFLO_DAEMON_AUTOSTART: '0' } });
       const n = (r.stdout.match(/lesson-/g) || []).length; return { ok: n === 0, detail: `${n} lesson-* rows in project .swarm (plugin store: ~/.config/ruvnet-brain/lessons.json)` }; } },
   { id: 'E4', area: 'hooks', scope: 'machine', title: 'One session-start continuity restorer (global hook stands down when the plugin is enabled)',
     run: () => { const s = readAbs(path.join(HOME, '.claude/hooks/agentdb-ensure.sh')); return { ok: s.includes('SINGLE CONTINUITY OWNER'), detail: 'agentdb-ensure.sh must stand down its project-state recall' }; } },
