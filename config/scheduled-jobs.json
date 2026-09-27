@@ -1,7 +1,7 @@
 {
-  "_why": "THE REGISTRY OF WHAT MUST BE RUNNING. Created 2026-07-13 after a failure that must never repeat: com.ruvnet.brain-nightly's launchd trigger had NEVER fired, and nothing noticed, because 'is it running?' was only ever answered by looking at a job's own exit code \u2014 and launchd reports exit 0 for a job that has never run, which is indistinguishable from success. Silence was being read as health.",
+  "_why": "THE REGISTRY OF WHAT MUST BE RUNNING. Created 2026-07-13 after a failure that must never repeat: com.ruvnet.brain-nightly's launchd trigger had NEVER fired, and nothing noticed, because 'is it running?' was only ever answered by looking at a job's own exit code — and launchd reports exit 0 for a job that has never run, which is indistinguishable from success. Silence was being read as health.",
   "_how_it_works": "scripts/job-heartbeat.sh wraps every job and writes start/end/exit receipts that a dying job cannot forge or skip (trap-protected). scripts/nightly-watchdog.mjs compares THIS registry against reality: a job listed here that is not loaded, or loaded but has no fresh receipt, or has a receipt with a non-zero exit, is a VIOLATION and gongs the phone. Absence of evidence is failure, never 'probably fine'.",
-  "_adding_a_job": "Add it here FIRST, then wrap its plist command in job-heartbeat.sh. A job not in this registry is unwatched by definition \u2014 that is the whole point of a registry rather than per-job good intentions.",
+  "_adding_a_job": "Add it here FIRST, then wrap its plist command in job-heartbeat.sh. A job not in this registry is unwatched by definition — that is the whole point of a registry rather than per-job good intentions.",
   "heartbeatDir": "~/.cache/ruvnet-brain/heartbeats",
   "jobs": [
     {
@@ -36,23 +36,23 @@
       "schedule": "daily 03:33",
       "maxAgeHours": 26,
       "required": true,
-      "_was_blind": "THE PUREST CASE OF THE BUG. On a healthy day this script returns early and writes ZERO BYTES anywhere \u2014 its log and state file sat frozen 2+ days stale while it fired on schedule every night. 'Ran and did nothing (healthy)' was literally indistinguishable from 'never ran', ~76 days out of every 90. The heartbeat wrapper fixes this for free: the RECEIPT is written by the wrapper, so the job no longer has to remember to report."
+      "_was_blind": "THE PUREST CASE OF THE BUG. On a healthy day this script returns early and writes ZERO BYTES anywhere — its log and state file sat frozen 2+ days stale while it fired on schedule every night. 'Ran and did nothing (healthy)' was literally indistinguishable from 'never ran', ~76 days out of every 90. The heartbeat wrapper fixes this for free: the RECEIPT is written by the wrapper, so the job no longer has to remember to report."
     },
     {
       "label": "com.stuartkerr.api-spend-watchdog",
-      "what": "Hourly guard against runaway API spend and agent bursts \u2014 the one that actually pages the phone",
+      "what": "Hourly guard against runaway API spend and agent bursts — the one that actually pages the phone",
       "schedule": "hourly",
       "maxAgeHours": 3,
       "required": true,
-      "_note": "It has been pushing '4 scheduled jobs failing silently' every hour, correctly \u2014 but off launchctl's exit-code field, which CANNOT see a job that never ran. It alerts; it just can't see the hole. Now it is itself watched: nothing supervised the supervisor."
+      "_note": "It has been pushing '4 scheduled jobs failing silently' every hour, correctly — but off launchctl's exit-code field, which CANNOT see a job that never ran. It alerts; it just can't see the hole. Now it is itself watched: nothing supervised the supervisor."
     },
     {
-      "label": "com.stuartkerr.ruflo-autoupdate",
-      "what": "Keeps the whole RuvNet/Ruflo npm stack current (npm i -g ~26 packages on @latest/@alpha)",
+      "label": "com.stuartkerr.ak-sync",
+      "what": "The ONE machine updater: agentic-kit upgrades the RuvNet/Ruflo npm stack and refreshes the installed RuvNet Brain (plugin + knowledge), then heals and verifies",
       "schedule": "daily 03:30",
       "maxAgeHours": 26,
       "required": true,
-      "_note": "This is THE job that keeps rUv's stack fresh on this machine. It was unwatched until 2026-07-13 \u2014 the single most important update job here had no supervision at all."
+      "_why": "2026-09-26 single-source consolidation: replaced com.stuartkerr.ruflo-autoupdate (a second npm-stack updater that failed daily on the first one's npx cache) and the brain's own com.ruvnet.brain-update (which agentic-kit removes by design as the single update owner, but never scheduled itself). One owner, scheduled, watched."
     },
     {
       "label": "com.cognitum.ruvector-autoupdate",
@@ -60,7 +60,7 @@
       "schedule": "every 6h",
       "maxAgeHours": 8,
       "required": true,
-      "_note": "Its git stash pop has silently failed once (orphaned stash@{0} from 2026-06-28 \u2014 it swallowed local edits and nothing said so). The heartbeat now catches a non-zero exit; the orphaned stash still needs a human decision."
+      "_note": "Its git stash pop has silently failed once (orphaned stash@{0} from 2026-06-28 — it swallowed local edits and nothing said so). The heartbeat now catches a non-zero exit; the orphaned stash still needs a human decision."
     },
     {
       "label": "com.stuartkerr.clear-claude-tmp",
@@ -68,18 +68,18 @@
       "schedule": "every 3h",
       "maxAgeHours": 5,
       "required": true,
-      "_was_lying": "Its log line had the date BAKED IN at plist-write time \u2014 all 43 entries since 2026-04-06 were byte-identical. It worked; its log was a lie. Now a real script with a real $(date) and a real delete count."
+      "_was_lying": "Its log line had the date BAKED IN at plist-write time — all 43 entries since 2026-04-06 were byte-identical. It worked; its log was a lie. Now a real script with a real $(date) and a real delete count."
     },
     {
       "label": "com.ruvnet.nightly-watchdog",
-      "what": "Watches all of the above. Listed here so that IT is watched too \u2014 a watchdog nobody watches is the same blind spot one level up",
+      "what": "Watches all of the above. Listed here so that IT is watched too — a watchdog nobody watches is the same blind spot one level up",
       "schedule": "daily 09:00",
       "maxAgeHours": 26,
       "required": true
     },
     {
       "label": "com.ruvnet.issue-watch",
-      "what": "Hourly GitHub-issues SLA watcher (stuinfla/ruvnet-brain) \u2014 pages ntfy when an open issue sits >4h with no comment from the repo owner",
+      "what": "Hourly GitHub-issues SLA watcher (stuinfla/ruvnet-brain) — pages ntfy when an open issue sits >4h with no comment from the repo owner",
       "schedule": "hourly",
       "maxAgeHours": 3,
       "required": true

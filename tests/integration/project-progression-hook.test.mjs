@@ -304,6 +304,67 @@ describe('ADR-073 host-neutral progression capture', () => {
     expect(observation.stderr).toContain('[truncated]');
   });
 
+  it('does not infer success from an unstructured response, and parses native textual exit status', () => {
+    const project = temporaryProject();
+    const unknownStore = recordingStore(project);
+    const unknown = captureProjectTransition({
+      host: 'codex',
+      payload: envelope(project, 'codex', {}, {
+        tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: 'completed',
+      }),
+      projectDir: project, adapterVersion: getVersion(), storeFactory: unknownStore.factory,
+    });
+    expect(unknown.snapshot.completeProjectState.commands.at(-1).outcome).toBe('unknown');
+
+    const quotedStore = recordingStore(project);
+    const quoted = captureProjectTransition({
+      host: 'codex',
+      payload: envelope(project, 'codex', {}, {
+        tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: 'log example: status: 0 (quoted, not a terminal envelope)',
+      }),
+      projectDir: project, adapterVersion: getVersion(), storeFactory: quotedStore.factory,
+    });
+    expect(quoted.snapshot.completeProjectState.commands.at(-1).outcome).toBe('unknown');
+
+    const failedStore = recordingStore(project);
+    const failed = captureProjectTransition({
+      host: 'codex',
+      payload: envelope(project, 'codex', {}, {
+        tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: 'Exit code: 1',
+      }),
+      projectDir: project, adapterVersion: getVersion(), storeFactory: failedStore.factory,
+    });
+    expect(failed.snapshot.completeProjectState.commands.at(-1)).toMatchObject({ outcome: 'failure', exitCode: 1 });
+  });
+
+  it('keeps an interrupted managed action distinct from an ordinary failure', () => {
+    const project = temporaryProject();
+    const store = recordingStore(project);
+    const { snapshot } = captureProjectTransition({
+      host: 'codex',
+      payload: envelope(project, 'codex', {}, {
+        tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { interrupted: true, signal: 'SIGINT' },
+      }),
+      projectDir: project, adapterVersion: getVersion(), storeFactory: store.factory,
+    });
+    expect(snapshot.completeProjectState.commands.at(-1)).toMatchObject({ outcome: 'interrupted', interrupted: true });
+    expect(snapshot.completeProjectState.failures.at(-1).outcome).toBe('interrupted');
+  });
+
+  it('keeps terminal failure authoritative over a contradictory declared success', () => {
+    const project = temporaryProject();
+    const store = recordingStore(project);
+    const { snapshot } = captureProjectTransition({
+      host: 'codex', payload: envelope(project, 'codex', {}, {
+        tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { outcome: 'success', exit_code: 1 },
+      }), projectDir: project, adapterVersion: getVersion(), storeFactory: store.factory,
+    });
+    expect(snapshot.completeProjectState.commands.at(-1).outcome).toBe('failure');
+  });
+
 describe('the existing dual-host session snapshot hook is the production caller', () => {
   it('preserves the metadata receipt and forwards an explicit progression envelope', () => {
     const project = temporaryProject();

@@ -3,13 +3,14 @@ id: ADR-057
 title: 95 on both graders — closing a 38/53 against a self-reported 83, dimension by dimension
 status: Proposed
 date: 2026-07-27
-updated: 2026-09-19
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.0.1
 impl: verification-expired
 verified: 2026-07-30
 verified_digest: 1c276a7dfbc5
 verified_by: governed-source claim ledger in this ADR plus node scripts/doc-currency.mjs --json
-reviewed_digest: 2f8099012566
+reviewed_digest: 9451bb97892a
 governs:
   - scripts/behavioral-l1-l4.mjs
   - scripts/no-silent-substitution.mjs
@@ -251,6 +252,7 @@ to the five governed paths; it does not adjudicate the product or substitute for
   last independent score recorded here; source reconciliation cannot revise it.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: bin/install.mjs release fixes (macOS deadline, serverDependencies, corpus-currency, capability discovery). No change to the dual-grader 95 threshold or its measurement. | Reviewed `scripts/behavioral-l1-l4.mjs`, `scripts/no-silent-substitution.mjs`, `tests/mesh/coexistence.test.mjs`, `bin/install.mjs`, `plugin/hooks/hooks.json` against the commits listed above; reviewed_digest 9451bb97892a. |
 
 | 2026-09-19 | Reviewed current source and normative claims; the detailed September 19 findings below retain their stated runtime limitations. reviewed_digest 2f8099012566. | `scripts/behavioral-l1-l4.mjs`, `scripts/no-silent-substitution.mjs`, `tests/mesh/coexistence.test.mjs`; source consistency review only, no new deployment or acceptance claim. |
 

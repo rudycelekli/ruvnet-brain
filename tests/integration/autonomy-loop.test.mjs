@@ -74,17 +74,52 @@ function runHook(prompt, { cwd = tmp, env = {} } = {}) {
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-describe('(i) runs without asking — an autonomous prompt flips the hook into AUTONOMOUS MODE; a plain build prompt does not', () => {
-  it('an autonomous prompt ("keep working autonomously... do not stop") emits AUTONOMOUS MODE with an explicit instruction not to ask the go/no-go', () => {
-    const out = runHook('keep working autonomously until tests pass, do not stop');
+// H3: AUTON used to arm on plain conversational phrases an ATTENDED human types all the time —
+// "autonomous", "unattended", "don't stop", "keep going/working", "soak run". A human plainly
+// present in the conversation typing "please keep working on this, don't stop until it's green" is
+// not an empty room; the fix restricts AUTON to signals a human does not type by hand: the
+// `<<autonomous-loop` sentinel a real unattended harness wraps its own prompts in, a `/loop` slash
+// command LEADING the text, or the explicit RUVNET_AUTONOMOUS=1 environment signal. Every genuine
+// case below now uses `<<autonomous-loop>>` as the trigger instead of conversational phrasing.
+const AUTONOMOUS_TRIGGER = '<<autonomous-loop>> implement the retry policy';
+
+describe('(i) runs without asking — a genuine machine signal flips the hook into AUTONOMOUS MODE; conversational phrasing does not', () => {
+  it('the <<autonomous-loop>> sentinel emits AUTONOMOUS MODE with an explicit instruction not to ask the go/no-go', () => {
+    const out = runHook(AUTONOMOUS_TRIGGER);
     expect(out.status).toBe(0);
     expect(out.stdout).toMatch(/AUTONOMOUS MODE/);
     expect(out.stdout).toMatch(/NEVER halt to ask/);
     expect(out.stdout).toMatch(/do NOT ask "Want me to build it now\?" or any\s+go\/no-go/);
   });
 
+  it('a leading /loop command emits AUTONOMOUS MODE', () => {
+    const out = runHook('/loop keep going until the tests pass');
+    expect(out.status).toBe(0);
+    expect(out.stdout).toMatch(/AUTONOMOUS MODE/);
+  });
+
   it('a non-autonomous build prompt ("implement the retry policy") does NOT emit AUTONOMOUS MODE', () => {
     const out = runHook('implement the retry policy');
+    expect(out.status).toBe(0);
+    expect(out.stdout).not.toMatch(/AUTONOMOUS MODE/);
+  });
+
+  it('H3 REGRESSION: conversational autonomy language from an ATTENDED human does NOT emit AUTONOMOUS MODE (RED on pre-fix code)', () => {
+    const conversational = [
+      'keep working autonomously until tests pass, do not stop',
+      'please keep going on this, do not stop until it is green',
+      'this is an unattended soak run, keep working',
+      "don't stop until every test passes",
+    ];
+    for (const prompt of conversational) {
+      const out = runHook(prompt);
+      expect(out.status, prompt).toBe(0);
+      expect(out.stdout, `should NOT arm AUTONOMOUS MODE for: ${JSON.stringify(prompt)}`).not.toMatch(/AUTONOMOUS MODE/);
+    }
+  });
+
+  it('the bare word "loop" NOT at the start of the prompt does not arm it (only a LEADING /loop command counts)', () => {
+    const out = runHook('please review this for-loop implementation');
     expect(out.status).toBe(0);
     expect(out.stdout).not.toMatch(/AUTONOMOUS MODE/);
   });
@@ -106,7 +141,7 @@ describe('(ii) kill -9 resume — a checkpoint survives a fresh process, and the
 
   it('the hook, run with cwd = the checkpoint\'s temp dir on an autonomous prompt, injects a RESUME block containing the checkpoint (including "step C")', () => {
     writeCp({ iteration: 2, next: 'step C' });
-    const out = runHook('keep working autonomously until tests pass, do not stop', { cwd: tmp });
+    const out = runHook(AUTONOMOUS_TRIGGER, { cwd: tmp });
     expect(out.stdout).toMatch(/RESUME/);
     expect(out.stdout).toMatch(/step C/);
     // The RESUME line explicitly says not to repeat completed work — the other half of clause (ii).
@@ -132,7 +167,7 @@ describe('(iii) done halt — `check` exits 3 only when doneCriteria is a shell 
 
 describe('(iv) fence — the AUTONOMOUS MODE block states the HARD FENCE, names publish / force-push / secrets, and instructs stop-and-name-the-click', () => {
   it('names the fenced actions and the required response when hit', () => {
-    const out = runHook('keep working autonomously until tests pass, do not stop');
+    const out = runHook(AUTONOMOUS_TRIGGER);
     expect(out.stdout).toMatch(/HARD FENCE/);
     expect(out.stdout).toMatch(/publish/i);
     expect(out.stdout).toMatch(/--force|force-push/i);
@@ -173,5 +208,53 @@ describe('RUVNET_AUTONOMOUS=1 forces AUTONOMOUS MODE even on a prompt with no au
     const out = runHook('implement the retry policy', { env: { RUVNET_AUTONOMOUS: '1' } });
     expect(out.status).toBe(0);
     expect(out.stdout).toMatch(/AUTONOMOUS MODE/);
+  });
+});
+
+// H3: a checkpoint from a loop that ended days ago used to be injected UNCONDITIONALLY — resumed as
+// though it were the current session's own live state, with no age check at all. The hook now judges
+// staleness via scripts/loop-checkpoint.mjs's checkpointStaleness() (CHECKPOINT_STALE_MS = 24h),
+// resolved SELF-RELATIVE to ground-ruvnet.sh's own location so it works regardless of the calling
+// project's cwd (this repo's own dev checkout, where `scripts/` really does sit two levels above
+// `plugin/scripts/`, is exactly the layout under test here).
+describe('stale checkpoint is never injected as if it were live (H3)', () => {
+  function backdateCheckpoint(daysAgo) {
+    const file = path.join(tmp, '.ruvnet-brain', 'checkpoint.json');
+    const cp = JSON.parse(fs.readFileSync(file, 'utf8'));
+    cp.updatedAt = new Date(Date.now() - daysAgo * 86_400_000).toISOString();
+    fs.writeFileSync(file, JSON.stringify(cp, null, 2));
+  }
+
+  it('a FRESH checkpoint (just written) is still injected as a RESUME block (control — proves the mechanism is not just permanently off)', () => {
+    writeCp({ iteration: 1, next: 'step FRESH' });
+    const out = runHook(AUTONOMOUS_TRIGGER, { cwd: tmp });
+    expect(out.status).toBe(0);
+    expect(out.stdout).toMatch(/RESUME/);
+    expect(out.stdout).toMatch(/step FRESH/);
+  });
+
+  it('a checkpoint whose updatedAt is 3 days old is NOT injected, and one line names the age instead (RED on pre-fix code)', () => {
+    writeCp({ iteration: 1, next: 'step STALE' });
+    backdateCheckpoint(3);
+    const out = runHook(AUTONOMOUS_TRIGGER, { cwd: tmp });
+    expect(out.status).toBe(0);
+    // "RESUME FIRST" is part of the always-present AUTONOMOUS MODE banner (rule 2); the RESUME
+    // BLOCK this test cares about is the "RESUME: your prior checkpoint" line, only emitted when a
+    // checkpoint is actually injected.
+    expect(out.stdout).not.toMatch(/RESUME: your prior checkpoint/);
+    expect(out.stdout).not.toMatch(/step STALE/);
+    expect(out.stdout).toMatch(/stale checkpoint \(age 3 days\) was ignored/);
+  });
+
+  it('a checkpoint just under the 24h threshold is still injected; just over it is not (boundary)', () => {
+    writeCp({ iteration: 1, next: 'boundary step' });
+    backdateCheckpoint(0.9); // ~21.6h — fresh
+    let out = runHook(AUTONOMOUS_TRIGGER, { cwd: tmp });
+    expect(out.stdout).toMatch(/RESUME/);
+
+    backdateCheckpoint(1.01); // ~24.24h — stale
+    out = runHook(AUTONOMOUS_TRIGGER, { cwd: tmp });
+    expect(out.stdout).not.toMatch(/RESUME: your prior checkpoint/);
+    expect(out.stdout).toMatch(/stale checkpoint/);
   });
 });
