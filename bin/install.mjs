@@ -2449,7 +2449,22 @@ async function smokeQuery(cacheDir) {
       // The stable MCP shell sets this exact default before spawning its worker. Passing the same
       // path here makes the install smoke warm the model cache the product will actually reopen,
       // instead of a second kb-local cache that can go green while the real door stays cold.
-      env: { ...process.env, KB_MODEL_CACHE: resolveRuntimeModelCache() },
+      //
+      // RUVNET_BRAIN_QUERY_DEADLINE_MS: this ONE probe is the very first query ever run against a
+      // freshly-installed cache — the model is cold and the cross-encoder "rerank" phase has to pay
+      // load cost that every later, warm query never pays again. Measured on macOS GitHub Actions
+      // runners 2026-09-27 (public-verification runs 36324328134 job 108636740357, 28.5-28.7s; and
+      // 36325803503 job 108638381147, 27.1-27.2s): this exact probe consistently needs ~27-29s on
+      // that platform, against the general 20s deadline (kb/query-deadline.mjs
+      // DEFAULT_QUERY_DEADLINE_MS) that is correct for every normal, warm query. 45s keeps this
+      // bounded (never unbounded — the module's core guarantee) while giving this one cold-start
+      // probe real margin, without touching the default that protects normal queries everywhere
+      // else. Only applied if the caller hasn't already set an explicit override.
+      env: {
+        ...process.env,
+        KB_MODEL_CACHE: resolveRuntimeModelCache(),
+        RUVNET_BRAIN_QUERY_DEADLINE_MS: process.env.RUVNET_BRAIN_QUERY_DEADLINE_MS ?? '45000',
+      },
     });
   } catch {
     warn("skipped the live test (couldn't launch the reader) — it'll warm on your first real question");
