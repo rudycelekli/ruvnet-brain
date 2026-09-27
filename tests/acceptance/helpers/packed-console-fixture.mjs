@@ -108,7 +108,11 @@ export async function installPackedConsole({ prefix, catalog = null, profile = n
     ...process.env,
     HOME: home,
     USERPROFILE: home,
+    // RUVNET_CONSOLE_ROOT isolates nightly-scheduler mutations to this fixture's own home
+    // (nightly-controller.mjs's schedulerEnvironment); that guard requires RUVNET_BRAIN_TEST=1
+    // alongside it (added 620d7bc9, after this fixture was written) or it refuses to run at all.
     RUVNET_CONSOLE_ROOT: home,
+    RUVNET_BRAIN_TEST: '1',
     RUVNET_CONSOLE_DISABLE_BACKGROUND_REFRESH: '1',
   };
 

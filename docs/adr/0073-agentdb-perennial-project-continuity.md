@@ -3,8 +3,9 @@ id: ADR-073
 title: AgentDB is the complete perennial project continuity record
 status: Accepted
 date: 2026-08-22
-updated: 2026-09-19
-reviewed_digest: ab0caaff7c62
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: c05f9c6169e4
 authors: [Stuart Kerr, Codex]
 tags: [architecture, agentdb, continuity, hosts, recovery, durability]
 supersedes: []
@@ -175,6 +176,7 @@ discretion, manual resume step, alternate store, or unverified readback is a rel
 recovery evidence, not proof of continuous capture or cross-host automatic restoration.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: continuity-binding fixes (trusted host context, managed capture identity, refresh-race closure) and a new terminal-outcome contradiction test. These are the continuity mechanism being hardened, consistent with the ADR, not a redesign. | Reviewed `docs/ddd/0019-project-continuity-context.md`, `plugin/scripts/project-progression-contract.mjs`, `plugin/scripts/project-progression-hook.mjs`, `plugin/hooks/hooks.json`, `plugin/hooks/codex-hooks.json`, `tests/unit/project-progression-contract.test.mjs` against the commits listed above; reviewed_digest c05f9c6169e4. |
 
 | Date | What changed | Why |
 |---|---|---|

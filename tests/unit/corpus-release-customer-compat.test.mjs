@@ -195,8 +195,10 @@ if (!doc.stores?.[value('--name')]) { console.error('no entry for store "'+value
   }
 }
 
-/** Publish `source` as the single .zip asset of a release tagged `tag`. */
-function publish(source, tag) {
+/** Publish `source` as the single .zip asset of a release tagged `tag`. `body` carries the release
+ * notes text (S2: currencyVerdict parses an optional `Corpus generation:` ordering key from it, the
+ * same field scripts/corpus-promotion.mjs already writes for `releases/latest` promotion). */
+function publish(source, tag, { body = undefined } = {}) {
   const stage = path.join(root, `stage-${tag.slice(0, 24)}`);
   fs.rmSync(stage, { recursive: true, force: true });
   layDown(stage, source);
@@ -208,6 +210,7 @@ function publish(source, tag) {
   served.release = {
     tag_name: tag,
     published_at: '2026-09-10T00:00:00.000Z',
+    ...(body === undefined ? {} : { body }),
     assets: [{ name: 'ruvnet-brain-kb-bundle.zip', browser_download_url: `${origin}/bundle.zip` }],
   };
   return stage;
@@ -274,6 +277,72 @@ describe('corpus release: install A -> current; install B once -> current (no re
     expect(checkB.code, checkB.out).toBe(0);
     expect(checkB.out).toMatch(/All stores current/);
     expect(served.hits.zip, 'B is installed ONCE — two corpora, two downloads, total').toBe(2);
+  }, 120_000);
+});
+
+// ── 1b. CORPUS GENERATION ORDERING KEY (S2: ONE CURRENCY VERDICT) ─────────────────────────────────
+// The ordering key travels in the release's own body/notes as `Corpus generation: <ISO8601>` — the
+// same field scripts/corpus-promotion.mjs already uses as the sole author-side ordering key for
+// `releases/latest` promotion. kb/corpus-release-identity.mjs's recordCorpusGenerationIdentity()
+// stamps it into the installed tree atomically with the transport tag; kb/forge-update.mjs's
+// currencyVerdict() then refuses a candidate that is strictly older, never silently reinstalling
+// backward.
+describe('corpus release: generation ordering key (rollback protection)', () => {
+  it('stamps corpusGeneration atomically with the transport tag on a normal apply', async () => {
+    layDown(kbDir, sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-08-30T04:39:28.414Z', stores: [STORE_A] }));
+    publish(sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-09-01T12:00:00.000Z', stores: [STORE_A] }), CORPUS_A,
+      { body: 'Corpus generation: 2026-09-01T10:00:00.000Z' });
+
+    const applyA = await run('--apply');
+    expect(applyA.code, applyA.out).toBe(0);
+    expect(readSource().corpusReleaseTag).toBe(CORPUS_A);
+    expect(readSource().corpusGeneration).toBe('2026-09-01T10:00:00.000Z');
+  }, 60_000);
+
+  it('REFUSES a candidate whose generation predates the installed one — no download, exit 0, live untouched', async () => {
+    layDown(kbDir, sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-08-30T04:39:28.414Z', stores: [STORE_A] }));
+    publish(sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-09-01T12:00:00.000Z', stores: [STORE_A] }), CORPUS_A,
+      { body: 'Corpus generation: 2026-09-05T00:00:00.000Z' });
+    const applyA = await run('--apply');
+    expect(applyA.code, applyA.out).toBe(0);
+    expect(readSource().corpusGeneration).toBe('2026-09-05T00:00:00.000Z');
+    const downloadsAfterA = served.hits.zip;
+
+    // Offer corpus B, whose PUBLISHED generation is OLDER than what is already installed (e.g. a
+    // stale CDN/cache serving an out-of-order artifact). Rollback protection must refuse it.
+    publish(sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-08-20T12:00:00.000Z', stores: [STORE_A2] }), CORPUS_B,
+      { body: 'Corpus generation: 2026-08-15T00:00:00.000Z' });
+
+    const check = await run('--check');
+    expect(check.code, 'REFUSED is a clean exit 0, never 10 — it must not invite --apply').toBe(0);
+    expect(check.out).toMatch(/REFUSED/);
+    expect(check.out).toMatch(/predates installed generation/);
+    expect(served.hits.zip, 'a check must never download').toBe(downloadsAfterA);
+
+    const apply = await run('--apply');
+    expect(apply.code, apply.out).toBe(0);
+    expect(apply.out).toMatch(/REFUSED/);
+    expect(served.hits.zip, 'refused before a single byte of the older archive was fetched').toBe(downloadsAfterA);
+    // Live is untouched: still corpus A, byte for byte.
+    expect(readSource().corpusReleaseTag).toBe(CORPUS_A);
+    expect(readSource().corpusGeneration).toBe('2026-09-05T00:00:00.000Z');
+    expect(readSource().stores.alpha.sourceCommit).toBe(STORE_A.sourceCommit);
+  }, 120_000);
+
+  it('a genuinely NEWER generation is still applied normally', async () => {
+    layDown(kbDir, sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-08-30T04:39:28.414Z', stores: [STORE_A] }));
+    publish(sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-09-01T12:00:00.000Z', stores: [STORE_A] }), CORPUS_A,
+      { body: 'Corpus generation: 2026-09-01T00:00:00.000Z' });
+    expect((await run('--apply')).code).toBe(0);
+
+    publish(sourceJson({ brainVersion: RUNTIME_VERSION, builtUtc: '2026-09-02T12:00:00.000Z', stores: [STORE_A2] }), CORPUS_B,
+      { body: 'Corpus generation: 2026-09-10T00:00:00.000Z' });
+    const check = await run('--check');
+    expect(check.code, check.out).toBe(10);
+    const apply = await run('--apply');
+    expect(apply.code, apply.out).toBe(0);
+    expect(readSource().corpusReleaseTag).toBe(CORPUS_B);
+    expect(readSource().corpusGeneration).toBe('2026-09-10T00:00:00.000Z');
   }, 120_000);
 });
 

@@ -25,7 +25,7 @@ import {
 } from './incremental-refresh.mjs';
 import { chooseModelCache, loadRvf, loadTransformers } from './resolve-deps.mjs';
 import { getVersion, getVersionTag } from '../scripts/version.mjs';
-import { RVF_GENERATIONS_FILE, writeRvfGeneration } from '../scripts/rvf-generation.mjs';
+import { RVF_GENERATIONS_FILE, writeRvfGeneration, readRvfGenerations, projectSourceStore } from '../scripts/rvf-generation.mjs';
 const BGE = {
   model: 'Xenova/bge-base-en-v1.5',
   revision: '4d6cd88e18e51a5e020c2c305726d76ada9c03cf',
@@ -124,33 +124,33 @@ function releasesApiUrl(canonicalBase) {
   return match ? `https://api.github.com/repos/${match[1]}/${match[2]}/releases/latest` : null;
 }
 
-function writeSourceManifest() {
+// S4 (ONE PROVENANCE RECORD): SOURCE.json's store entry is a projection of the ledger row
+// stampCandidateGeneration() already wrote into `candidate` — read back, never independently
+// recomputed here. Must run AFTER stampCandidateGeneration() in every caller.
+function writeSourceManifestFromLedger() {
   const liveSource = path.join(out, 'SOURCE.json');
   let source = { builder: 'rvf-kb-forge', stores: {} };
   if (fs.existsSync(liveSource)) {
     try { source = JSON.parse(fs.readFileSync(liveSource, 'utf8')); } catch { /* rebuild below */ }
   }
-  const builtUtc = new Date().toISOString();
-  const provenance = gitInfo(root);
+  const ledger = readRvfGenerations(candidate);
+  const generation = ledger.stores?.[NAME];
+  if (!generation) throw new Error(`no ledger generation record for ${NAME} in ${candidate}`);
   const manifestUrl = releasesApiUrl(CANONICAL_URL);
   source.builder = 'rvf-kb-forge';
   source.brainVersion = getVersion();
   source.releaseTag = getVersionTag();
-  source.builtUtc = builtUtc;
+  source.builtUtc = generation.builtUtc;
   source.canonicalManifestUrl = manifestUrl;
   source.selfUpdate = 'node forge-update.mjs';
   source.stores ||= {};
-  source.stores[NAME] = {
-    kbName: NAME,
-    sourceRepo: provenance.remote || root,
-    sourceCommit: provenance.sha,
-    sourceDescribe: provenance.describe,
-    builtUtc,
+  source.stores[NAME] = projectSourceStore(NAME, generation, {
+    ...source.stores[NAME],
     builder: 'rvf-kb-forge',
     canonicalManifestUrl: manifestUrl,
     canonicalBundleUrl: CANONICAL_URL ? `${CANONICAL_URL}/${NAME}-kb-bundle.zip` : null,
     selfUpdate: `node forge-update.mjs ${NAME}`,
-  };
+  });
   fs.writeFileSync(path.join(candidate, 'SOURCE.json'), JSON.stringify(source, null, 2) + '\n');
 }
 
@@ -182,7 +182,6 @@ function writeCandidateSidecars(chunks, corpus, ledger, previousMeta) {
   };
   fs.writeFileSync(path.join(candidate, `${NAME}.passages.jsonl`), passages);
   fs.writeFileSync(path.join(candidate, `${NAME}.meta.json`), JSON.stringify(meta));
-  writeSourceManifest();
 }
 
 async function embedChunks(chunks, config) {
@@ -241,13 +240,16 @@ async function qaCandidate() {
 }
 
 function stampCandidateGeneration() {
+  const provenance = gitInfo(root);
   writeRvfGeneration({
     dir: candidate,
     previousDir: out,
     store: NAME,
     model: BGE.model,
     dimensions: BGE.dimensions,
-    sourceCommit: gitInfo(root).sha,
+    sourceCommit: provenance.sha,
+    sourceRepo: provenance.remote || root,
+    sourceDescribe: provenance.describe,
   });
 }
 
@@ -256,6 +258,7 @@ async function fullRefresh(reason, corpus, previousMeta, currentLedger) {
   writeCandidateSidecars(corpus.chunks, corpus, currentLedger, previousMeta);
   await runBigFull();
   stampCandidateGeneration();
+  writeSourceManifestFromLedger();
   await qaCandidate();
   promoteArtifactSet({ liveDir: out, candidateDir: candidate, files: artifactFiles });
   removeLegacyDuplicates();
@@ -285,6 +288,7 @@ async function incrementalRefresh(corpus, previousMeta, currentLedger) {
     path.join(candidate, `${NAME}.big.rvf.embed.json`),
   );
   stampCandidateGeneration();
+  writeSourceManifestFromLedger();
   await qaCandidate();
   promoteArtifactSet({ liveDir: out, candidateDir: candidate, files: artifactFiles });
   removeLegacyDuplicates();
@@ -344,6 +348,7 @@ async function migrateLegacyStore(corpus, previousMeta, currentLedger) {
   fs.copyFileSync(embedFile, path.join(candidate, `${NAME}.big.rvf.embed.json`));
   writeCandidateSidecars(corpus.chunks, corpus, currentLedger, previousMeta);
   stampCandidateGeneration();
+  writeSourceManifestFromLedger();
   await qaCandidate();
   promoteArtifactSet({ liveDir: out, candidateDir: candidate, files: artifactFiles });
   removeLegacyDuplicates();

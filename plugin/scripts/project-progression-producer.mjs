@@ -30,7 +30,7 @@
  */
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { digestCanonical, redactProgression, restoreProjectProgression } from './project-progression-contract.mjs';
+import { digestCanonical, fieldAuthorityAllows, redactProgression, restoreProjectProgression } from './project-progression-contract.mjs';
 import { readOwnerNote, readSourceIdentity, readTranscriptReference, readWorkLedger } from './project-progression-sources.mjs';
 import { withProgressionReader } from './project-progression-reader.mjs';
 
@@ -132,30 +132,34 @@ export function buildProjectProgression({
   const priorState = heads.length === 1 ? heads[0].completeProjectState : null;
 
   const provenance = {};
-  const record = (field, sourceName) => { provenance[field] = marker(sourceName); };
+  const record = (field, sourceName) => {
+    if (sourceName !== 'none' && !fieldAuthorityAllows(field === 'sourceIdentity' ? 'sourceIdentity' : field, sourceName)) {
+      throw new Error(`source ${sourceName} is not authoritative for progression field ${field}`);
+    }
+    provenance[field] = marker(sourceName);
+  };
 
-  // GOAL — the ledger's oldest open item is what the user actually committed to; the owner note and
-  // the prior head come next; the transcript is the last resort and is never authoritative.
+  // GOAL — the ledger's oldest open item is what the user actually committed to. A coherent prior
+  // head carries that commitment forward; an owner note or transcript can provide context only when
+  // no durable goal exists. Neither contextual source is an instruction.
   let currentGoal = ledger.open[0] ?? null;
   if (currentGoal) record('currentGoal', 'ledger');
   else if (typeof priorState?.currentGoal === 'string' && priorState.currentGoal) {
     currentGoal = priorState.currentGoal;
     record('currentGoal', 'prior-head');
-  } else if (transcript.derivedGoal) {
-    currentGoal = transcript.derivedGoal;
-    record('currentGoal', 'transcript-derived');
   } else if (note?.excerpt) {
     currentGoal = note.excerpt.split('\n')[0].slice(0, 240);
     record('currentGoal', 'owner-note');
+  } else if (transcript.derivedGoal) {
+    currentGoal = transcript.derivedGoal;
+    record('currentGoal', 'transcript-derived');
   } else record('currentGoal', 'none');
 
-  // NEXT ACTION — the next open ledger item, else the assistant's own last stated step (derived).
+  // NEXT ACTION — only a ledger commitment or coherent prior state may become a resumable action.
+  // Transcript text is evidence/context, never an invented structured action.
   let nextAction = ledger.open[1] ?? ledger.open[0] ?? null;
   if (nextAction) record('nextAction', 'ledger');
-  else if (transcript.derivedNextAction) {
-    nextAction = transcript.derivedNextAction;
-    record('nextAction', 'transcript-derived');
-  } else if (typeof priorState?.nextAction === 'string' && priorState.nextAction) {
+  else if (typeof priorState?.nextAction === 'string' && priorState.nextAction) {
     nextAction = priorState.nextAction;
     record('nextAction', 'prior-head');
   } else record('nextAction', 'none');

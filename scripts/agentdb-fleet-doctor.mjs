@@ -49,9 +49,13 @@ async function doctor(proj) {
   const hasSchema = sql(db, 'SELECT count(*) FROM episodes;') !== null;
   if (!hasSchema) row.notes.push('OLD SCHEMA — needs export/init/import migration (see migrate-agentdb-schema.sh)');
 
-  // What can the session-start hook actually see?
-  row.visible = Number(sql(db, `SELECT count(*) FROM memory_entries WHERE namespace='${name}';`) ?? 0);
-  row.checkpoint = Number(sql(db, `SELECT count(*) FROM memory_entries WHERE namespace='${name}' AND key LIKE 'project-state-current%';`) ?? 0) > 0;
+  // What can the session-start hook actually see? `name` is a directory basename the operator
+  // chose on the CLI, not adversarial input -- but a project folder with an apostrophe in its name
+  // would otherwise break this query's syntax, so it gets the same escaping every other SQL
+  // interpolation in this codebase already uses.
+  const escapedName = name.replace(/'/g, "''");
+  row.visible = Number(sql(db, `SELECT count(*) FROM memory_entries WHERE namespace='${escapedName}';`) ?? 0);
+  row.checkpoint = Number(sql(db, `SELECT count(*) FROM memory_entries WHERE namespace='${escapedName}' AND key LIKE 'project-state-current%';`) ?? 0) > 0;
 
   // Foreign-project namespaces: REPORT, never migrate.
   const nsRows = (sql(db, 'SELECT namespace, count(*) FROM memory_entries GROUP BY namespace;') || '')

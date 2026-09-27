@@ -127,6 +127,60 @@ export function rawToolResponse(ev) {
   return ev.tool_response;
 }
 
+// ── HARNESS-GENERATED PROMPT DETECTION (H2) ─────────────────────────────────────────────────────
+//
+// WHY THIS LIVES HERE, and not only in scripts/correction-detect.mjs where it started. Background
+// task notifications, slash-command scaffolding, and other harness-authored bookkeeping arrive on
+// UserPromptSubmit exactly like real user text — wrapped in tags such as <task-notification>,
+// <local-command-caveat>, <command-name>, <local-command-stdout>, and <system-reminder>. None of
+// that is something a human typed, but before this fix every UserPromptSubmit consumer that reads
+// `prompt`/`user_prompt`/`input` reacted to it as if it were a real prompt: grounding-turn-mark.mjs
+// could arm the Stop-time grounding gate off a harness message that happens to mention a rUv term,
+// unprompted-runtime.mjs's producers could fire advisories at a background notification, and
+// capacity-aware-parallel-work.mjs could recommend a parallel-work fan-out for text nobody wrote.
+// scripts/correction-detect.mjs already carried the exact regex list needed to recognise these
+// (HARNESS_TEMPLATES, built from live corpus evidence — see that file's header for the measured
+// 29%-of-holdout-pool finding that justified it) but as a private, unexported-to-this-purpose copy
+// nothing else could reuse. This is now the ONE owner; correction-detect.mjs re-exports its old name
+// from here instead of keeping its own literal array (tests/unit/hook-input-harness.test.mjs proves
+// the two never drift).
+export const HARNESS_GENERATED_PATTERNS = [
+  /\[Your previous response/i,
+  /\[Request interrupted/i,
+  /<\/?system-reminder>/i,
+  /<\/?(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|function_results|function_calls|budget)\b/i,
+  /^\s*Caveat:/i,
+  /Base directory for this skill:/i,
+  /This session is being continued from a previous conversation/i,
+  /^\s*#\s*claudeMd\b/im,
+  /\[INTELLIGENCE\]/i,
+];
+
+/** True when `promptText` is harness-authored bookkeeping rather than something a user typed. */
+export function isHarnessGenerated(promptText) {
+  const text = typeof promptText === 'string' ? promptText : String(promptText ?? '');
+  if (!text) return false;
+  return HARNESS_GENERATED_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * The bash-portable EQUIVALENT of isHarnessGenerated(), for ground-ruvnet.sh — a hot, every-prompt
+ * hook (see its own header on the 38s-regression bounded-read fix) that must not pay a `node` spawn
+ * per prompt just for this check. This constant is exactly what ground-ruvnet.sh embeds as its own
+ * `grep -qiE` literal (SOURCE OF TRUTH here — tests/unit/hook-input-harness.test.mjs parses
+ * ground-ruvnet.sh's copy and asserts byte-identity, same idiom as ruvnet-gate1-pattern.mjs's own
+ * copy-with-a-drift-test for Gate 1). Its relationship to HARNESS_GENERATED_PATTERNS above is
+ * BEHAVIORAL parity only, not byte-identity: that is an array of independently-flagged regexes (one
+ * uses the 'm' flag) with no single source ERE it could be copied from verbatim, so the same test
+ * instead proves real `grep -qiE` against this string agrees with isHarnessGenerated() on
+ * representative inputs — the same idiom ruvnet-gate1-pattern.test.mjs uses for ITS third,
+ * non-identity assertion. POSIX `[[:space:]]` is used instead of `\s` and plain `(...)` instead of
+ * `(?:...)` — GNU/PCRE extensions with no POSIX ERE guarantee — because this string must run under
+ * whatever `grep` a user's shell resolves to, not only the one on the machine that wrote it.
+ */
+export const HARNESS_GENERATED_SHELL_PATTERN =
+  '\\[Your previous response|\\[Request interrupted|</?system-reminder>|</?(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|function_results|function_calls|budget)\\b|^[[:space:]]*Caveat:|Base directory for this skill:|This session is being continued from a previous conversation|^[[:space:]]*#[[:space:]]*claudeMd\\b|\\[INTELLIGENCE\\]';
+
 /** Arbitrary dotted-path lookup (e.g. "tool_input.file_path"); "" if any segment is missing. */
 export function field(ev, dottedPath) {
   if (!ev || !dottedPath) return '';

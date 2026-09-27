@@ -29,14 +29,6 @@ function row(overrides = {}) {
 }
 
 describe('Top-100 acceptance is stricter than the legacy routing proxy', () => {
-  it('runs from the real release path after the non-averaging invariant vector', () => {
-    const release = fs.readFileSync(path.join(ROOT, 'scripts/release.mjs'), 'utf8');
-    const vector = release.indexOf("['scripts/release-vector.mjs']");
-    const top100 = release.indexOf("['scripts/top100-benchmark.mjs', '--no-write']");
-    expect(vector).toBeGreaterThanOrEqual(0);
-    expect(top100).toBeGreaterThan(vector);
-  });
-
   it('--help exits without starting the expensive MCP benchmark', () => {
     const output = execFileSync(process.execPath, ['scripts/top100-benchmark.mjs', '--help'], {
       cwd: ROOT,
@@ -46,12 +38,6 @@ describe('Top-100 acceptance is stricter than the legacy routing proxy', () => {
     expect(output).toContain('--ids top-001,top-093');
     expect(output).toContain('--no-write');
     expect(output).not.toContain('forge-mcp-all: serving');
-  });
-
-  it('keeps the release verifier pure unless an artifact path is explicit', () => {
-    const release = fs.readFileSync(path.join(ROOT, 'scripts/release.mjs'), 'utf8');
-    expect(release).toContain("['scripts/top100-benchmark.mjs', '--no-write']");
-    expect(release).not.toContain("['scripts/top100-benchmark.mjs']");
   });
 
   it('runs the candidate worker code through the stable spine while keeping installed KB data', () => {

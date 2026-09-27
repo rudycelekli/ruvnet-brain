@@ -108,6 +108,16 @@ const TABLE = {
   // one is the sole writer of unprompted BYTES, this one is the sole author of a REFUSAL. The four
   // policies it consults are unchanged and still individually tested; the gate only composes them.
   'decision-gate':    { file: 'decision-gate.mjs',   interpreter: 'node', mode: 'blocking', offBehavior: 'run', stdinBytes: 65536 },
+  // H5 CORRECTION (2026-09-26): a first pass removed these two TABLE entries as "retired dead code",
+  // since neither id is dispatched by plugin/hooks/hooks.json, plugin/hooks/codex-hooks.json, or this
+  // repo's .claude/settings.json. That broke a REAL test:
+  // tests/integration/codex-dispatch-cwd-divergence.test.mjs fires the genuine
+  // codex-hook.mjs -> codex-hook-adapter.mjs -> hook-shim.mjs 'learn-capture' chain to prove a real,
+  // shipped cross-host CWD-divergence fix (learn-capture.sh's project-containment check, #85/#107) —
+  // it needs the id to actually resolve through this TABLE, exactly as continuity-hook-policy.mjs's
+  // own header already says: "remains reachable through hook-shim's dispatch table by explicit
+  // invocation". Restored. wired-check.mjs's H6 fix does not depend on these keys existing either
+  // way — it stopped trusting hook-shim.mjs as a blind generic spawner, not their presence here.
   'learn-capture':    { file: 'learn-capture.sh',    interpreter: 'bash', mode: 'advisory', offBehavior: 'silence' },
   'learn-flush':      { file: 'learn-flush.mjs',     interpreter: 'node', mode: 'advisory', offBehavior: 'silence' },
   'session-snapshot': { file: 'session-snapshot-hook.mjs', interpreter: 'node', mode: 'advisory', offBehavior: 'run', stdinBytes: 65536 },
