@@ -11,7 +11,7 @@ import { managedStorageInventory } from '../kb/update-storage-transaction.mjs';
 import { REQUIRED_REFRESH_PHASES, validateCurrentRunPhaseExecution, inspectRefreshOwner, refreshLockPath } from '../kb/refresh-run.mjs';
 import { npmInvocation } from './npm-invocation.mjs';
 import { packageTreeObservation, observeNpxPackage, validateNpxObservations } from './nightly-package-observation.mjs';
-import { validateRefreshReceiptEnvelope } from '../plugin/scripts/nightly-scheduler.mjs';
+import { NIGHTLY_LABEL, NIGHTLY_PROOF_LABEL, validateRefreshReceiptEnvelope } from '../plugin/scripts/nightly-scheduler.mjs';
 import { validateCoverageDirectory, validateCoverageLedger } from '../plugin/scripts/coverage-integrity.mjs';
 
 const PUBLIC_KEY = fs.readFileSync(new URL('../keys/ruvnet-brain-signing.pub.pem', import.meta.url), 'utf8');
@@ -117,7 +117,7 @@ function refreshExecutionStopped(receipt, kbDir) {
 export async function triggerNativeRun({ scheduler, registration, platform, env, brainHome, kbDir,
   timeoutMs, command = run, receipts = nightlyReceipts, pause = sleep, now = Date.now, stopped = refreshExecutionStopped }) {
   const identity = registration.identity;
-  if (!/^com\.ruvnet\.brain-update\.proof-[A-Za-z0-9._-]+$/.test(identity || '')) {
+  if (!NIGHTLY_PROOF_LABEL.test(identity || '')) {
     throw new Error('native proof requires a unique proof scheduler identity');
   }
   if (!['darwin', 'linux', 'win32'].includes(platform)) throw new Error(`unsupported native scheduler platform: ${platform}`);
@@ -209,7 +209,7 @@ export async function runNativeSchedulerSmoke({ packageRoot, packagePath, bundle
     || typeof scheduler.installScheduler !== 'function' || typeof scheduler.schedulerStatus !== 'function'
     || typeof scheduler.removeScheduler !== 'function') throw new Error('scheduler smoke adapter is incomplete');
 
-  const identity = `com.ruvnet.brain-update.proof-smoke-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  const identity = `${NIGHTLY_LABEL}.proof-smoke-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
   const packageSha256 = sha256(fs.readFileSync(packageArchive));
   const bundleSha256 = sha256(fs.readFileSync(bundle));
   const registration = scheduler.installNightlyRunner({ brainHome,
@@ -281,7 +281,7 @@ export function validateNativeSchedulerSmoke(smoke, { platform, sourceSha, workf
     || smoke.scope !== 'public-release-scheduler-boundary') failures.push('scheduler smoke envelope is invalid');
   if (smoke.platform !== platform || smoke.sourceSha !== sourceSha
     || String(smoke.workflowRunId || '') !== String(workflowRunId || '')) failures.push('scheduler smoke identity differs');
-  if (!/^com\.ruvnet\.brain-update\.proof-smoke-[A-Za-z0-9._-]+$/.test(smoke.identity || '')) failures.push('scheduler smoke identity is not isolated');
+  if (!NIGHTLY_PROOF_LABEL.test(smoke.identity || '') || !String(smoke.identity || '').includes('.proof-smoke-')) failures.push('scheduler smoke identity is not isolated');
   if (smoke.loaded !== true || smoke.cleaned !== true || smoke.trigger?.identity !== smoke.identity) failures.push('scheduler smoke did not prove load, trigger, and cleanup');
   const expectedTrigger = { darwin: 'launchctl-kickstart', linux: 'cron-registration', win32: 'schtasks-run' }[platform];
   if (smoke.trigger?.kind !== expectedTrigger) failures.push('scheduler smoke trigger differs');
@@ -424,7 +424,7 @@ export function validateNightlyProofReceipt(receipt, { platform, version, packag
   if (!/^[a-f0-9]{64}$/.test(bundleSha256 || '') || receipt.candidate?.bundle?.sha256 !== bundleSha256) failures.push('native proof bundle digest differs');
   if (!/^[a-f0-9]{40}$/.test(sourceSha || '') || receipt.sourceSha !== sourceSha) failures.push('native proof source SHA differs');
   if (!/^\d+$/.test(String(workflowRunId || '')) || String(receipt.workflowRunId || '') !== String(workflowRunId)) failures.push('native proof workflow run differs');
-  if (!/^com\.ruvnet\.brain-update\.proof-[A-Za-z0-9._-]+$/.test(receipt.identity || '')) failures.push('native proof identity is not isolated');
+  if (!NIGHTLY_PROOF_LABEL.test(receipt.identity || '')) failures.push('native proof identity is not isolated');
   if (receipt.packageExecution !== undefined || receipt.registration?.packageTarget?.spec === 'ruvnet-brain@latest') {
     failures.push(...validateNpxObservations(receipt));
   }
@@ -480,7 +480,7 @@ export async function runNightlyTwoRunProof({ packagePath, bundlePath, out, time
   const prefix = path.join(root, 'prefix');
   const npmCache = path.join(root, 'npm-cache');
   const logPath = path.join(kbDir, 'update.log');
-  const identity = `com.ruvnet.brain-update.proof-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  const identity = `${NIGHTLY_LABEL}.proof-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
   const tempDir = path.join(root, 'tmp');
   const env = {
     ...Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'ComSpec', 'COMSPEC', 'PATHEXT']

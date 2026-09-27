@@ -7,10 +7,11 @@ import { canonicalJson, digest } from './coverage-integrity.mjs';
 import { retrievalOracleExpectationFromPlan, validateRetrievalOracleReview } from './independent-review-receipt.mjs';
 import { validateRetrievalCanaryPlan, validateRetrievalCanaryReceipt } from './retrieval-canary.mjs';
 import { validateNightlyProofReceipt, validateNativeSchedulerSmoke } from './nightly-two-run-proof.mjs';
+import { CLAUDE_FABLE_5_ID, GPT_5_6_SOL_ID, LEGACY_REVIEW_MODEL_IDS } from './review-model-defaults.mjs';
 
 export const PUBLIC_VERIFICATION_OS = Object.freeze(['linux', 'macos', 'windows']);
 export const PUBLIC_VERIFICATION_MODES = Object.freeze(['claude', 'codex', 'dual']);
-export const REQUIRED_REVIEW_MODELS = Object.freeze(['claude-fable-5', 'gpt-5.6-sol']);
+export const REQUIRED_REVIEW_MODELS = LEGACY_REVIEW_MODEL_IDS;
 
 const HEX40 = /^[a-f0-9]{40}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -110,10 +111,10 @@ export function validateIndependentReviewReceipt(review) {
     || typeof review.execution?.invocationDigest !== 'string' || !HEX64.test(review.execution.invocationDigest)) {
     throw new Error('independent review receipt is malformed, below 95, or incomplete');
   }
-  if (review.model === 'claude-fable-5' && review.provider !== 'firstParty') {
+  if (review.model === CLAUDE_FABLE_5_ID && review.provider !== 'firstParty') {
     throw new Error('Fable 5 review did not use the verified first-party subscription path');
   }
-  if (review.model === 'gpt-5.6-sol' && (review.provider !== 'openai' || typeof review.execution.threadId !== 'string'
+  if (review.model === GPT_5_6_SOL_ID && (review.provider !== 'openai' || typeof review.execution.threadId !== 'string'
     || !review.execution.threadId || !HEX64.test(String(review.execution.catalogRowSha256 || '')))) {
     throw new Error('GPT-5.6-Sol review lacks live catalog and thread evidence');
   }

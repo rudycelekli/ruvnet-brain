@@ -49,12 +49,12 @@ is every one of them, what it does, and whether it can block you:
 | `PostToolUse` (`Write`\|`Edit`\|`MultiEdit`\|`Bash`) | `learn-capture.sh` | Appends one line per tool call to a local per-session queue (mode `0600`, in a `0700` directory): the tool name plus either a Bash command's **leading verb chain only** — at most two tokens, stopping at the first token containing `=`, `/`, `@` or `:` — or an edited file's basename (never its path or contents). So `git push` is recorded as `git push`, while `export AWS_SECRET_ACCESS_KEY=…` records only `export` and `cd /Users/you/ClientProject` records only `cd`. **This previously captured the first 120 characters up to an embedded quote, which did not protect unquoted inline secrets; that was a real defect, fixed 2026-07-22 (ADR-038) and covered by a test that replays credential-bearing commands.** | No — always exits 0. |
 | `SessionEnd` | `learn-flush.mjs` | Reads that session's queue, dedupes to at most 8 distinct actions, and feeds them into the ruflo/AgentDB self-learning store **at `$HOME`** (i.e. your global, cross-project learner, not this project's `.swarm/memory.db`) via `ruflo hooks post-command`/`post-edit`. Deletes the queue file when done. | No — best-effort, every failure swallowed. |
 
-`plugin/scripts/` also ships four more scripts — `ground-before-write.sh`, `grounding-stamp.sh`,
-`kling-preflight.sh`, `version-bump-gate.sh` — that are **not** referenced in `hooks.json`. They ship as
-inert files with every install; they only ever run if something *else* explicitly wires them into a
-`settings.json` (this repo's own [`.claude/settings.json`](.claude/settings.json) wires
-`version-bump-gate.sh` for this repo's own maintainers — that is a project-scoped dev convenience, not
-part of what an installed plugin does for you).
+`plugin/scripts/` also ships three more scripts — `ground-before-write.sh`, `grounding-stamp.sh`,
+`kling-preflight.sh` — that are **not** referenced in `hooks.json`. They ship as inert files with every
+install; they only ever run if something *else* explicitly wires them into a `settings.json`. (A fourth,
+`version-bump-gate.sh`, filled this role for this repo's own maintainers as a project-scoped dev
+convenience; it was deleted 2026-09-26 once this repo's own `.claude/settings.json` stopped wiring any
+automatic shell-command interceptor at all.)
 
 ## What leaves your machine — and what never does
 

@@ -98,7 +98,10 @@ describe('ensureUpdaterPrerequisites — placement happens only where an updater
 
   it('runUpdate() calls it after the missing-updater check and BEFORE spawning the updater', () => {
     const source = fs.readFileSync(path.join(ROOT, 'bin', 'install.mjs'), 'utf8');
-    const start = source.indexOf('function runUpdate()');
+    // async since the authenticated staged private update rail (kb/forge-update.mjs's
+    // applyVerifiedStagedRelease) needs to `await resolveRelease()`/`obtainBundle()` in its
+    // private-overlay-aware fallback branch.
+    const start = source.indexOf('async function runUpdate()');
     const end = source.indexOf('function enableNightly()', start);
     expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start);
     const body = source.slice(start, end);

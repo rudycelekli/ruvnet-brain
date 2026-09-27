@@ -1,4 +1,4 @@
-Updated: 2026-07-29 22:24:00 EDT | Version 1.0.0
+Updated: 2026-09-26 09:29:53 EDT | Version 1.0.1
 Created: 2026-07-29 22:24:00 EDT
 
 # RuvNet Brain 4.0 Agentic-QE master plan
@@ -56,7 +56,7 @@ breaks the contract.
 | QE-CON-002 | P0 | honest measurement | empty evidence is displayed as a fabricated precision score | `tests/unit/console-advocacy-precision.test.mjs` | H |
 | QE-RES-001 | P0 | resources | an idle Brain child remains resident indefinitely | `tests/unit/mcp-timeout-outage.test.mjs` | H |
 | QE-RES-002 | P0 | resources | idle retirement kills an in-flight or concurrent query | `tests/qe/gpt56/worker-concurrency-retirement.test.mjs` | H |
-| QE-REL-001 | P0 | provenance | GitHub Release, tag, assets, and npm are not one exact candidate | `tests/qe/release/release-publish-contract.test.mjs` | A/C |
+| QE-REL-001 | P0 | provenance | GitHub Release, tag, assets, and npm are not one exact candidate | `tests/unit/public-verification-lane.test.mjs` | A/C |
 | QE-REL-002 | P0 | clean install | source checkout masks a missing published file | `tests/qe/release/packed-clean-install.test.mjs` | A |
 | QE-FLT-001 | P0 | fault injection | timeout burns CPU while stale health remains green | `tests/unit/mcp-timeout-outage.test.mjs` | H |
 | QE-FLT-002 | P0 | recovery | compression bomb or deceptive expansion leaves partial output | `tests/qe/security/release-abuse-cases.test.mjs` | H |

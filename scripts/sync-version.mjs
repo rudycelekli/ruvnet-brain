@@ -41,6 +41,14 @@ export function writeExplainerBadgeVersion(s, version) {
   return s.replace(/(&middot;\s*v)\d+\.\d+\.\d+(?:-[\w.-]+)?/, `$1${version}`);
 }
 
+// The explainer once showed a second, competing version next to the product version
+// ("candidate preview" ... "public npm vX.Y.Z") — two versions on one public page, exactly the
+// defect single-source-check.mjs check B10 exists to catch (fixed 2026-09-26). This regression
+// guard keeps it from silently coming back.
+export function hasSplitVersionLabel(s) {
+  return /candidate preview|public npm v\d/i.test(s);
+}
+
 // Each target: a file, a regex to find the version-bearing line, and the corrected line.
 const targets = [
   { // Codex plugin manifest — same product, same release train as the Claude manifest
@@ -156,6 +164,20 @@ if (CHECK && fs.existsSync(path.join(ROOT, 'kb/RVF-GENERATIONS.json'))) {
         // alt text:  "RuvNet Brain version <ver> — updated <timestamp>" → swap <ver>, keep the timestamp
         .replace(/(RuvNet Brain version )\S+( — updated )/, `$1${V}$2`);
       if (next !== s) { fs.writeFileSync(p, next); console.log(`[version] README badge: ${badgeVer} -> ${V}`); }
+    }
+  }
+}
+
+// Guard: the explainer must never again show a second, competing version next to the product
+// version (the "candidate preview" / "public npm vX.Y.Z" split fixed 2026-09-26 — see
+// hasSplitVersionLabel() above and single-source-check.mjs check B10). This is a content
+// regression, not a mechanical one, so --check only reports it; there is no auto-fix.
+{
+  const p = path.join(ROOT, 'explainer/index.html');
+  if (fs.existsSync(p) && hasSplitVersionLabel(fs.readFileSync(p, 'utf8'))) {
+    if (CHECK) {
+      console.error('[version] DRIFT: explainer/index.html shows a second/candidate version label ("candidate preview" / "public npm vX") — the page must show exactly one current version');
+      drift++;
     }
   }
 }

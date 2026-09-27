@@ -8,6 +8,7 @@ import {
   MANAGED_CLI_TOOLS,
   callManagedCli,
   helpKey,
+  normalizeManagedExecution,
   resolveManagedExecutable,
   stampKeysForHelp,
 } from '../../plugin/mcp/managed-cli-interface.mjs';
@@ -53,6 +54,15 @@ describe('managed CLI structured interface policy', () => {
     expect(source).toMatch(/shell:\s*false/);
   });
 
+  it('keeps missing terminal status unknown and rejects nonzero or contradictory execution', () => {
+    expect(normalizeManagedExecution({ code: null, stdout: '', stderr: '', error: null }).outcome).toBe('unknown');
+    expect(normalizeManagedExecution({ code: 1, stdout: '', stderr: '', error: null }).outcome).toBe('failure');
+    expect(normalizeManagedExecution({ code: 0, stdout: '[ERROR] refused', stderr: '', error: null }).outcome).toBe('failure');
+    expect(normalizeManagedExecution({ code: 0, stdout: 'ok', stderr: '', error: null }).outcome).toBe('success');
+    expect(normalizeManagedExecution({ code: null, signal: 'SIGINT', stdout: '', stderr: '', error: null }))
+      .toMatchObject({ outcome: 'interrupted', signal: 'SIGINT' });
+  });
+
   it('pins Ruflo to the one global binary when it exists', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-ruflo-home-'));
     const canonical = path.join(home, '.npm-global', 'bin', process.platform === 'win32' ? 'ruflo.cmd' : 'ruflo');
@@ -86,6 +96,78 @@ describe('managed CLI structured interface policy', () => {
       expect.objectContaining({ executable: 'ruflo', observationClass: 'current-version', observedVersion: '3.38.16' }),
     ]);
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('exposes the real managed execution boundary for durable pre/post capture', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-cli-lifecycle-'));
+    const canonical = path.join(home, '.npm-global', 'bin', process.platform === 'win32' ? 'ruflo.cmd' : 'ruflo');
+    fs.mkdirSync(path.dirname(canonical), { recursive: true });
+    fs.writeFileSync(canonical, process.platform === 'win32'
+      ? '@echo ruflo ok\r\n'
+      : '#!/bin/sh\nprintf "ruflo ok\\n"\n');
+    fs.chmodSync(canonical, 0o755);
+    const env = { ...process.env, HOME: home, RUVNET_BRAIN_HOME: path.join(home, '.cache', 'brain'), RUVNET_BRAIN_PROJECT_DIR: home };
+    const phases = [];
+    await callManagedCli('ruvnet_cli_help', { executable: 'ruflo', argv: ['status'] }, env);
+    const result = await callManagedCli('ruvnet_cli_run', { executable: 'ruflo', argv: ['status'] }, env, globalThis.fetch, {
+      beforeExecute: ({ executable, argv }) => { phases.push(['before', executable, argv]); },
+      afterExecute: ({ normalized }) => { phases.push(['after', normalized.outcome]); },
+    });
+    expect(result.isError).toBe(false);
+    expect(phases).toEqual([['before', 'ruflo', ['status']], ['after', 'success']]);
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('requires adopted projects to acknowledge durable pre and post progression capture', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-cli-capture-'));
+    const canonical = path.join(home, '.npm-global', 'bin', process.platform === 'win32' ? 'ruflo.cmd' : 'ruflo');
+    fs.mkdirSync(path.dirname(canonical), { recursive: true });
+    fs.writeFileSync(canonical, process.platform === 'win32' ? '@echo ok\r\n' : '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(canonical, 0o755);
+    const env = { ...process.env, HOME: home, RUVNET_BRAIN_HOME: path.join(home, '.cache', 'brain') };
+    await callManagedCli('ruvnet_cli_help', { executable: 'ruflo', argv: ['status'] }, env);
+    const events = [];
+    const result = await callManagedCli('ruvnet_cli_run', { executable: 'ruflo', argv: ['status'] }, env, globalThis.fetch, {
+      capture: ({ event }) => { events.push(event); return { adopted: true, progressionCaptured: true }; },
+    });
+    expect(result.isError).toBe(false);
+    expect(events).toEqual(['PreToolUse', 'PostToolUse']);
+
+    const refused = await callManagedCli('ruvnet_cli_run', { executable: 'ruflo', argv: ['status'] }, env, globalThis.fetch, {
+      capture: ({ event }) => event === 'PreToolUse' ? { adopted: true, progressionCaptured: false, skipped: 'outbox unavailable' } : { adopted: true, progressionCaptured: true },
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('outbox unavailable');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('refuses the actual managed path when the adopted canonical store resolves outside the project', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-cli-foreign-'));
+    const home = path.join(root, 'home');
+    const bin = path.join(home, '.npm-global', 'bin');
+    const project = path.join(root, 'project');
+    const foreign = path.join(root, 'foreign');
+    fs.mkdirSync(bin, { recursive: true }); fs.mkdirSync(path.join(project, '.swarm'), { recursive: true }); fs.mkdirSync(foreign, { recursive: true });
+    const executable = path.join(bin, 'ruflo');
+    fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n'); fs.chmodSync(executable, 0o755);
+    fs.writeFileSync(path.join(foreign, 'memory.db'), 'foreign');
+    fs.symlinkSync(foreign, path.join(project, '.swarm', 'memory.db'));
+    const env = { ...process.env, HOME: home, RUVNET_BRAIN_HOME: path.join(home, '.cache', 'brain'), RUVNET_BRAIN_PROJECT_DIR: project, RUVNET_HOOK_HOST: 'codex' };
+    await callManagedCli('ruvnet_cli_help', { executable: 'ruflo', argv: ['status'] }, env);
+    const result = await callManagedCli('ruvnet_cli_run', { executable: 'ruflo', argv: ['status'] }, env);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/store could not be resolved|refused/i);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not accept a caller supplied host label for continuity identity', async () => {
+    const env = { ...process.env, RUVNET_HOOK_HOST: undefined };
+    const capture = [];
+    const result = await callManagedCli('ruvnet_cli_run', { executable: 'ruflo', argv: ['status'], host: 'codex' }, env, globalThis.fetch, {
+      capture: ({ event, env: childEnv }) => { capture.push([event, childEnv.RUVNET_HOOK_HOST]); return { adopted: true, progressionCaptured: true }; },
+    });
+    expect(result.isError).toBe(true);
+    expect(capture).toEqual([]);
   });
 
   it('exposes a read-only registry probe and mints latest-version evidence from its exact response', async () => {

@@ -26,7 +26,6 @@ const LANES = Object.freeze({
   // Fail design/provenance issues before any long behavioral or platform lane starts.
   preflight: [
     { kind: 'command', command: process.execPath, args: ['--check', 'scripts/qe/agentic-qe-4.3.mjs'], timeoutMs: 10_000 },
-    { kind: 'command', command: process.execPath, args: ['--check', 'scripts/qe/aggregate-4.3.mjs'], timeoutMs: 10_000 },
     { kind: 'command', command: npm, args: ['run', 'version:check'], timeoutMs: 60_000 },
     vitest(['tests/qe/gpt56/critical-risk-map.test.mjs'], 60_000),
   ],

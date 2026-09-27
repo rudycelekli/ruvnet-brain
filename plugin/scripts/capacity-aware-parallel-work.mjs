@@ -12,6 +12,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isHarnessGenerated } from './hook-input.mjs';
 
 export const UNKNOWN_RUNTIME_TOTAL_AGENT_CEILING = 4;
 const INPUT_LIMIT = 32 * 1024;
@@ -180,6 +181,9 @@ export function runCapacityHook(rawInput, sample) {
   let input;
   try { input = JSON.parse(String(rawInput || '')); } catch { return ''; }
   const prompt = input?.prompt ?? input?.user_prompt ?? input?.input;
+  // H2: a background task notification or other harness-authored message reads as substantial
+  // "independent work" prose but nobody wrote it — never advise a parallel-work fan-out off of one.
+  if (isHarnessGenerated(prompt)) return '';
   if (!isSubstantialParallelWork(prompt)) return '';
   return formatAdvisory(effectiveAgentRecommendation(sample === undefined ? collectMacPressure() : sample, {
     configuredMaxChildren: input?.configured_max_children,

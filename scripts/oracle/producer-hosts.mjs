@@ -18,9 +18,10 @@
  * with them.
  */
 import { spawn } from 'node:child_process';
+import { DUAL_HOST_MODEL_IDS } from '../review-model-defaults.mjs';
 
 // Pinned on 2026-09-13 against the native hosts (same ids scripts/dual-host-deliberation.mjs pins).
-export const PRODUCER_MODELS = Object.freeze({ claude: 'claude-fable-5-1', codex: 'gpt-6-astra' });
+export const PRODUCER_MODELS = DUAL_HOST_MODEL_IDS;
 export const PRODUCER_HOSTS = Object.freeze(['claude', 'codex']);
 export const DEFAULT_ROLES = Object.freeze({ generator: 'claude', judge: 'codex' });
 export const CLAUDE_TIMEOUT_MS = 900_000;

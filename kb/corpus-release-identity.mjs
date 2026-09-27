@@ -50,6 +50,42 @@ import { createHash } from 'node:crypto';
 /** The corpus transport tag shape published by scripts/corpus-seed-publish.mjs's corpusSeedTag(). */
 export const CORPUS_TAG_PATTERN = /^corpus-sha256-[0-9a-f]{64}$/;
 
+// CODE_TAG_PATTERN / releaseKind / CORPUS_GENERATION_FIELD / parseCorpusGeneration below are literal
+// copies of scripts/release-channel-kind.mjs and scripts/corpus-promotion.mjs. This module SHIPS
+// standalone inside the distributed KB bundle (kb/forge-update.mjs's only imports are siblings in
+// this same directory — see the fixtures in tests/unit/*-apply-rollback.test.mjs, which copy exactly
+// the kb/*.mjs files a real bundle carries); `scripts/` is build/release tooling that never ships.
+// CORPUS_TAG_PATTERN above is already duplicated this same way for the same reason. Keep both copies
+// byte-identical in behavior; tests/unit/corpus-release-identity-channel-parity.test.mjs pins that.
+
+/** Owner-approved product release: a plain semver tag. */
+export const CODE_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
+
+export function releaseKind(tag) {
+  const value = String(tag ?? '');
+  if (CORPUS_TAG_PATTERN.test(value)) return 'corpus';
+  if (CODE_TAG_PATTERN.test(value)) return 'code';
+  return 'other';
+}
+
+/** The author-side ordering key field name for a corpus release's `releases/latest` promotion
+ * (scripts/corpus-promotion.mjs's CORPUS_GENERATION_FIELD) — S2 reuses it as the client-side
+ * ordering key so promotion and currency comparisons can never disagree about what "generation"
+ * means. */
+export const CORPUS_GENERATION_FIELD = 'Corpus generation:';
+
+/** Parse the `Corpus generation:` line out of a release's body/notes text, exactly as
+ * scripts/corpus-promotion.mjs's evaluateCorpusPromotion does for publish-time ordering. Returns
+ * `{ value, epoch }` (the raw string and its parsed epoch) or null when absent/unparseable. */
+export function parseCorpusGeneration(body) {
+  const line = String(body || '').split('\n').map((row) => row.trim())
+    .find((row) => row.startsWith(CORPUS_GENERATION_FIELD));
+  if (!line) return null;
+  const value = line.slice(CORPUS_GENERATION_FIELD.length).trim();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? { value, epoch: parsed } : null;
+}
+
 /** The installer-written record of which approved runtime this KB belongs to. */
 export const INSTALLED_RUNTIME_FILE = 'RUNTIME-IDENTITY.json';
 
@@ -205,6 +241,43 @@ export function recordCorpusTransportIdentity(treeDir, { releaseTag }) {
     // this tree no longer holds.
     if (!Object.hasOwn(source, 'corpusReleaseTag')) return source;
     delete source.corpusReleaseTag;
+  }
+  atomicJson(file, source);
+  return source;
+}
+
+/**
+ * Record the ordering key a corpus release's generation is compared by (S2, corpus-currency gate).
+ * Written IN the tree being installed, next to `recordCorpusTransportIdentity` (same caller, same
+ * candidate directory, same atomic rename into place) so a crash between the two can never leave a
+ * tree whose transport tag and generation ordering key disagree.
+ *
+ * `generation` is read from the CANDIDATE release's own published record — parseCorpusGeneration
+ * against the release body's `Corpus generation:` line (scripts/corpus-promotion.mjs), the same
+ * field that is already the sole author-side ordering key for `releases/latest` promotion. It is
+ * never invented locally and never derived from a local clock: kb/forge-update.mjs's isBehind()
+ * history (this file's header) is the standing lesson in why a locally-observed timestamp can never
+ * safely stand in for an authenticated ordering key.
+ *
+ * IDEMPOTENT for the same reason recordCorpusTransportIdentity is (see its comment): touch the file
+ * only when the field's value actually changes, or a byte-identical re-apply reads as `applied`
+ * instead of `noop` and strands a rollback copy.
+ */
+export function recordCorpusGenerationIdentity(treeDir, { corpusReleaseTag, generation }) {
+  const file = path.join(treeDir, 'SOURCE.json');
+  const source = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (isCorpusReleaseTag(corpusReleaseTag) && typeof generation === 'string' && generation) {
+    if (source.corpusGeneration === generation) return source;
+    source.corpusGeneration = generation;
+  } else {
+    // No generation identity to record for this candidate — an ordinary code release, or a corpus
+    // release whose published record carries no readable ordering key. Never leave a PRIOR
+    // generation stamped: a code release supersedes it outright (its bundle IS the corpus), and a
+    // corpus candidate that declares no generation of its own must not leave behind a number that no
+    // longer describes what is actually on disk — the next comparison must read UNKNOWN, not compare
+    // against a generation this tree no longer holds.
+    if (!Object.hasOwn(source, 'corpusGeneration')) return source;
+    delete source.corpusGeneration;
   }
   atomicJson(file, source);
   return source;
