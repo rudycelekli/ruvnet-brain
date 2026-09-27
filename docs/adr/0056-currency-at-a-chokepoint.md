@@ -3,9 +3,10 @@ id: ADR-056
 title: Pay the debt, then wire the gate — document currency without a ratchet
 status: Proposed
 date: 2026-07-27
-updated: 2026-09-19
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.2.1
-reviewed_digest: 04d3acc31aa9
+reviewed_digest: 3fe43538cf2c
 impl: wired
 governs:
   - scripts/wired-check.mjs
@@ -343,6 +344,7 @@ Both models credited exactly one section of v1 as correct and correctly-sized: *
 fix** — which is the one section that was already built.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: wired-check hardening (a lesson-migration reclassification, a hook-shim TABLE over-trust fix) and a QE gate consolidation. The chokepoint design is unchanged. | Reviewed `scripts/wired-check.mjs`, `scripts/doc-currency.mjs`, `scripts/git-hooks/pre-push`, `plugin/scripts/md-stamp.mjs` against the commits listed above; reviewed_digest 3fe43538cf2c. |
 
 | 2026-09-19 | Kept the currency verdict unchanged while removing repeated local scan work. Each governed path's caller search is memoized only inside one `evaluate()` call; the next invocation reads current Git/source state. | `scripts/doc-currency.mjs`; `tests/unit/doc-currency.test.mjs` proves one lookup for duplicate ADR declarations and fresh results after an edit. No threshold or finding rule changed. |
 | 2026-09-12 | Currency review at commit b593a92b: decision unchanged, and the gate is stronger — `scripts/wired-check.mjs` now excludes `.claude/worktrees/` from the caller search (`b593a92b`, test-first: two of three assertions red on the old code). The defect it removes is the one this document exists to prevent: with any agent worktree present, the worktree's full repository copy was counted as a caller, so `handoff-asset` read `wired` while invoked by nothing and the entire MANUAL class read 0 — a green gate that was measuring a copy of the repo instead of the repo. `--check` with no worktree present is unchanged (261 wired · 7 manual · 56 exempt · 4 held · 0 UNWIRED), which is the point: the fix changes nothing about the real tree, only stops the pollution. | Reviewed `scripts/wired-check.mjs`; `scripts/doc-currency.mjs`, `scripts/git-hooks/pre-push`, `plugin/scripts/md-stamp.mjs` did not move. reviewed_digest 04d3acc31aa9. |

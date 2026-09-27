@@ -3,8 +3,8 @@ id: ADR-013
 title: The Onboarding Console — RuvNet Brain becomes a mirror, an advisor, and only then a configurator
 status: Accepted
 date: 2026-07-14
-updated: 2026-09-11
-updated_source: authored-current
+updated: 2026-09-27
+updated_source: derived-from-git
 authors: [Stuart Kerr, Claude Code]
 tags: [onboarding, ux, config, stack, memory-health, savings, safety, coverage]
 supersedes: []
@@ -18,7 +18,7 @@ created_at: 2026-07-14T17:28:48-04:00
 created_at_source: derived-from-git
 updated_at: 2026-09-11T00:00:00-04:00
 updated_at_source: authored-current
-reviewed_digest: b957f4e6d0c8
+reviewed_digest: c8c5b7ca0fa8
 ---
 
 # ADR-013: The Onboarding Console
@@ -282,6 +282,7 @@ there. The `console/*` glob already governs the new files, so `governs:` does no
 again under the new name: `CONSOLE_RUNTIME_SURFACE` lists `console/` whole.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion since last review: a worktree merge, an orphaned-file deletion sweep, and a learner-scope read fix in onboarding-console.mjs. None touch the console's mirror/advisor/configurator ordering. | Reviewed `scripts/onboarding-console.mjs`, `scripts/console-runtime-identity.mjs`, `console/CONTRACT.md`, `console/activity.js`, `console/app.js`, `console/architecture.html` against the commits listed above; reviewed_digest c8c5b7ca0fa8. |
 
 | 2026-09-16 | Re-read the Console runtime and client after the continuity consistency repair. Resolver refusal is UNKNOWN rather than a guessed store read; refresh responses and the client expose settled, failed, and already-running states. | Reviewed `scripts/onboarding-console.mjs` and `console/app.js`; the regression uses the real spawned server and rendered page token. Recall quality remains unclaimed when unprobed. reviewed_digest b957f4e6d0c8. |
 
