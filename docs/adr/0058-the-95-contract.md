@@ -3,10 +3,11 @@ id: ADR-058
 title: The 95 contract — one observable per dimension, one mutant per observable, and the external-signal watch plane
 status: Proposed
 date: 2026-07-27
-updated: 2026-09-19
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.1.6
 impl: wired
-reviewed_digest: 351f22130c54
+reviewed_digest: fe360deac106
 authors: [Stuart Kerr, Claude Fable 5, GPT-5.6-Sol (codex)]
 tags: [qa, gen2-qe, grading, external-signals, ci-watch, release-gate, mutation]
 supersedes: []
@@ -88,6 +89,7 @@ Codex replay now registers isolated fixture hooks explicitly; the prior uninstru
 UNKNOWN, and no new behavioral learning result is claimed.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: a broad set of release-pipeline hardening commits (search timing, hook validation, publication-receipt search safety, CI workflow fixes) across install.mjs, hook-shim.mjs, session-start-core.mjs, and release.mjs. All are reliability fixes to the machinery that PROVES the 95 contract; none change the contract's threshold or scope. | Reviewed `bin/install.mjs`, `plugin/hooks/hooks.json`, `plugin/hooks/codex-hooks.json`, `plugin/scripts/codex-hook-adapter.mjs`, `plugin/scripts/codex-hook-wrapper.mjs`, `plugin/scripts/hook-shim.mjs` against the commits listed above; reviewed_digest fe360deac106. |
 | 2026-09-19 | Kept all eight detector predicates and their individual timeouts unchanged while removing the second full detector-graph run from the CLI unit tests. One real CLI graph execution returns per-invariant elapsed milliseconds; opt-in `--timings` writes start/completion events to stderr so a timed-out graph still identifies its active detector. Deterministic fixtures exercise text/JSON rendering and PASS/FAIL/UNKNOWN/dirty exit mapping from the same result. | `scripts/release-vector.mjs`, `tests/unit/release-vector.test.mjs`; no blanket timeout increase or skipped detector. Full detector timing is environment-sensitive and does not qualify as a performance claim. |
 | 2026-09-19 | The release vector and verdict remain unchanged; local gate probes now reuse source text within each wired-check invocation and caller results within each document-currency evaluation. | `scripts/wired-check.mjs`, `scripts/doc-currency.mjs`; focused tests count avoided reads/lookups and prove edits are visible on the next invocation. No timeout was raised and no check was weakened. |
 | 2026-09-13 | Currency review (corpus-seed pipeline consolidation, step 5, remediated on top of `86cbe798`): decision unchanged. The seeded-scoping release projection this contract's release vector consumed — `scripts/release-projection.mjs` filtering coverage rows to the seed and rewriting survivors `CURRENT` — is retired: `createReleaseProjection` is a pure wrapper over Step-4-sealed coverage, and `scripts/build-bundle.mjs`'s `assembleBundle` VERIFIES the public-input seal on read (kind, schemaVersion, recomputed `receiptSha256`, per-file bytes, unsealed-prose leak check) instead of detecting that a file exists. Consumer status: `.github/workflows/ci.yml` `release-qe` is byte-identical to `main` and still runs the pre-consolidation build/project/build sequence against the pinned v4.2.1-dev seed; that path cannot satisfy the new sealed-input checks by design (the pinned seed predates the seal), and the consumer switch is the plan's step 11, after a Step-4-produced seed is published and re-pinned. | Reviewed `scripts/build-bundle.mjs`, `scripts/release-projection.mjs`, `scripts/public-inputs.mjs` (schema-2 receipt + `validateSelectionReceipt`), `.github/workflows/ci.yml` (0-line diff vs `main`), `tests/unit/assemble-bundle.test.mjs`. |

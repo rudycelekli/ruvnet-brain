@@ -3,8 +3,9 @@ id: ADR-062
 title: Remote-durable staged release transaction
 status: Accepted
 date: 2026-08-02
-updated: 2026-09-20
-reviewed_digest: 792292744a60
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 889398db3c8d
 version: 1.1.6
 authors: [Stuart Kerr]
 tags: [release, evidence, transaction, npm, github, receipts, recovery]
@@ -38,6 +39,7 @@ transaction remains `PUBLISHED_NOT_VERIFIED`; no unsuccessful closure or 4.3.10 
 established by this source review.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: this session's own release-pipeline fixes (macOS Mac-runner diagnostics, ENOBUFS buffer fix in release-transaction-provider.mjs) plus CI workflow hardening. These ARE the durable-release-transaction machinery being repaired, consistent with the ADR's intent, not a contradiction of it. | Reviewed `.github/workflows/ci.yml`, `.github/workflows/stranger-matrix.yml`, `.github/workflows/protected-release.yml`, `.github/workflows/release-candidate-preflight.yml`, `scripts/release.mjs`, `scripts/release-transaction.mjs` against the commits listed above; reviewed_digest 889398db3c8d. |
 
 | 2026-09-20 | Release-QE refreshes Cognitum ruOS's RVF from the one curated capabilities summary before bundle assembly, removes legacy source-bearing sidecars, and rebinds the runtime generation ledger. | The immutable v4.3.26 seed predates the capability-only contract enforced by `kb/capability-only.mjs`; the prior release step stopped at that boundary. |
 | 2026-09-20 | Capability-only policy now excludes the Cognitum ruOS implementation primer from public prose, removes it from the immutable seed, and prunes its historical passages from the Brain self-store RVF and metadata before resealing generation identity. | Archive replay found a second disclosure route outside the ruOS store: a standalone primer and four self-store vectors carried source paths and implementation detail. The tracked primer is removed so nightly corpus rebuilds cannot re-ingest it. |

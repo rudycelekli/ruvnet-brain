@@ -69,28 +69,56 @@ describe('corpus nightly dispatcher (ADR-086 step 18)', () => {
   });
 
 
-  it('does not hold a second runner open while the protected child completes', () => {
+  it('POLLS the protected child to a terminal state and fails when it did not succeed (2026-09-27 correction)', () => {
+    // A prior version of this test (#315, 2026-09-21) forbade polling here, on the theory that
+    // ntfy-alerts.yml's `workflow_run` listener on protected-release's own completion would carry
+    // visibility instead. That theory is false, and provably so: GitHub's own documented behavior
+    // is that a workflow_dispatch made with the automatic GITHUB_TOKEN (exactly what the dispatch
+    // step below does) runs the target workflow, but workflow_dispatch/repository_dispatch are the
+    // ONLY two events exempt from "GITHUB_TOKEN-triggered events do not create new workflow runs" —
+    // workflow_run is not exempt. So protected-release's completion, when dispatched this way, can
+    // never fire a `workflow_run` listener, no matter what is on its watch list. Checked against
+    // live run history 2026-09-27: every corpus-mode protected-release failure from 2026-09-21
+    // through 2026-09-27 (nine of them) produced zero ntfy-alerts runs within 15 minutes, including
+    // the two that happened AFTER protected-release was added to the watch list on 2026-09-26 —
+    // proving the watch-list entry could never have worked regardless of its presence.
+    //
+    // The fix does not reintroduce the "duplicate polling" #315 removed (two things polling the
+    // same run): it is the ONE poller, living here, in the dispatcher — which is the one part of
+    // this chain that runs on a genuine `schedule:` trigger, so ITS OWN completion IS a real
+    // platform event `workflow_run` correctly fires for (and `corpus-nightly-dispatch` was already,
+    // correctly, on ntfy-alerts.yml's watch list). A failed poll or a non-success child conclusion
+    // becomes this job's own failure, which the already-working listener then pages on.
     const source = executable(read(DISPATCHER));
-    expect(source).not.toContain('while (( SECONDS - started');
-    expect(source).not.toContain('target-run-status.json');
-    expect(source).not.toContain('sleep 30');
-    expect(source).toContain("recorded by the protected child's always-running corpus-terminal-outcome job");
+    expect(source).toContain('while [ "$(date +%s)" -lt "$deadline" ]; do');
+    expect(source).toContain('gh run view "$run_id"');
+    expect(source).toContain('sleep 60');
+    expect(source).toMatch(/if \[ "\$status" != completed \]; then\s*\n\s*echo "::error::/);
+    expect(source).toMatch(/if \[ "\$conclusion" != success \]; then\s*\n\s*echo "::error::/);
+    // Both non-success paths exit non-zero -- a red dispatcher is the alert.
+    const timeoutBranch = source.split('if [ "$status" != completed ]; then')[1]?.split('fi')[0] || '';
+    const conclusionBranch = source.split('if [ "$conclusion" != success ]; then')[1]?.split('fi')[0] || '';
+    expect(timeoutBranch).toContain('exit 1');
+    expect(conclusionBranch).toContain('exit 1');
   });
 
-  it('preserves success/failure/cancellation/timeout visibility without polling', () => {
+  it('stays secret-free while fixing alerting -- exit 1 is the entire mechanism', () => {
+    // The dispatcher's zero-secrets boundary (asserted below in the signing/publication-authority
+    // test) is deliberate and must survive this fix intact: no direct ntfy call here. A red
+    // dispatcher reaches the phone through corpus-nightly-dispatch's own, already-correctly-wired
+    // workflow_run listener -- nothing new to leak, nothing new to rotate.
+    const source = executable(read(DISPATCHER));
+    expect(source).not.toContain('NTFY_TOPIC');
+    expect(source).not.toContain('ntfy.sh');
+  });
+
+  it('still bounds the poll within its own job timeout, with real margin', () => {
     const source = read(DISPATCHER);
-    const notifier = read('.github/workflows/ntfy-alerts.yml');
-    const protectedRelease = read('.github/workflows/protected-release.yml');
-    expect(source).toContain('target run: [$run_id]($run_url)');
-    expect(notifier).toContain('"protected-release"');
-    expect(protectedRelease).toContain('corpus-terminal-outcome:');
-    expect(protectedRelease).toContain("if: always() && inputs.mode == 'corpus'");
-    expect(protectedRelease).toContain('name: corpus-release-outcome-${{ github.run_id }}-${{ github.run_attempt }}');
-    expect(protectedRelease).toContain('retention-days: 90');
-    expect(() => read('.github/workflows/corpus-release-outcome.yml')).toThrow();
-    expect(notifier).toContain('types: [completed]');
-    expect(notifier).toContain('[ "$WR_CONC" = "success" ] && exit 0');
-    expect(notifier).toContain('TITLE="🔴 CI ${WR_CONC}: ${WR_NAME}"');
+    const jobTimeout = Number((source.match(/timeout-minutes: (\d+)\n\s+permissions:\n\s+contents: read\n\s+actions: write/) || [])[1]);
+    const pollBudget = Number((executable(source).match(/deadline=\$\(\( \$\(date \+%s\) \+ (\d+) \* 60 \)\)/) || [])[1]);
+    expect(jobTimeout).toBe(360);
+    expect(pollBudget).toBeGreaterThan(0);
+    expect(pollBudget).toBeLessThan(jobTimeout);
   });
 
   it('records the dispatch against the exact candidate it dispatched', () => {
