@@ -50,6 +50,23 @@ fi
 TEXT=$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // .input // empty' 2>/dev/null)
 [ -z "$TEXT" ] && TEXT="$INPUT"
 
+# ── H2: HARNESS-GENERATED MESSAGES ARE NOT A USER'S PROMPT. ──────────────────────────────────────
+# Background task notifications, slash-command scaffolding, and other harness-authored bookkeeping
+# arrive on UserPromptSubmit exactly like real user text, wrapped in tags such as
+# <task-notification>, <local-command-caveat>, <command-name>, <local-command-stdout>, and
+# <system-reminder>. None of that is something a human typed, so none of Gates 1-4 below should ever
+# fire on it — injecting a grounding directive in response to the harness's own bookkeeping message
+# is noise on every background-task turn. This is a literal, byte-identical copy of
+# plugin/scripts/hook-input.mjs's HARNESS_GENERATED_SHELL_PATTERN (SOURCE OF TRUTH there), kept as a
+# copy here (not a `node hook-input.mjs` call) for the same reason Gate 1's own pattern below is a
+# copy: this is a hot, every-prompt hook (see the bounded-read comment above), and a process spawn
+# per prompt is exactly the kind of non-surgical cost this file's header warns against.
+# tests/unit/hook-input-harness.test.mjs proves this copy is byte-identical to
+# HARNESS_GENERATED_SHELL_PATTERN and that both agree with isHarnessGenerated() behaviorally.
+if printf '%s' "$TEXT" | grep -qiE '\[Your previous response|\[Request interrupted|</?system-reminder>|</?(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|function_results|function_calls|budget)\b|^[[:space:]]*Caveat:|Base directory for this skill:|This session is being continued from a previous conversation|^[[:space:]]*#[[:space:]]*claudeMd\b|\[INTELLIGENCE\]'; then
+  exit 0
+fi
+
 # ── QUIET-PROMPT FAST PATH. ────────────────────────────────────────────────────────────────────
 # A hook whose output contract is silence must not pay the full stack-currency/project-state scan
 # before discovering that nothing can fire. This mattered on a packed Windows install: immediately
@@ -403,8 +420,19 @@ fi
 # The bug this kills: line "5. CLEARED TO GO" below ends every build response with "Want me to
 # build it now?" — a question asked to an EMPTY ROOM inside a /loop. That is what a real user's
 # "it wouldn't run autonomously" looked like from the outside.
+#
+# H3 (fixed): the ORIGINAL fix over-corrected into a NEW bug in the opposite direction. Matching
+# conversational phrases — "autonomous", "unattended", "don't stop", "keep going/working", "soak
+# run" — meant an ATTENDED human saying ordinary things ("please keep working on this", "don't stop
+# until the tests pass") got the full AUTONOMOUS MODE block injected: "no human is watching", "NEVER
+# halt to ask", ignore the CLEARED-TO-GO checkpoint question. A human who is plainly IN the
+# conversation is not an empty room; inferring "nobody is watching" from prose a watching human just
+# typed is exactly backwards. AUTON is now restricted to signals a HUMAN does not type by hand: the
+# `<<autonomous-loop` sentinel a real unattended harness wraps its own prompts in, a `/loop` slash
+# command LEADING the text (the actual mechanism that starts a loop — see the `loop` skill — not the
+# bare word "loop" appearing anywhere), or the explicit RUVNET_AUTONOMOUS=1 environment signal.
 AUTON=0
-if printf '%s' "$TEXT" | grep -qiE '/loop|\bautonomous(ly)?\b|\bunattended\b|do(n.t| not) stop|keep (working|going)( until| on)?|\bsoak run\b|<<autonomous-loop'; then
+if printf '%s' "$TEXT" | grep -qiE '<<autonomous-loop|^[[:space:]]*/loop\b'; then
   AUTON=1
 fi
 [ "${RUVNET_AUTONOMOUS:-0}" = "1" ] && AUTON=1
@@ -492,9 +520,54 @@ if [ "$AUTON" -eq 1 ]; then
    and a wait.
 EOF
   if [ -f "$CP_FILE" ]; then
-    echo "[RuvNet Brain — RESUME: your prior checkpoint. Continue from 'next'; do not repeat done work.]"
-    cat "$CP_FILE" 2>/dev/null
-    echo ""
+    # H3: a checkpoint from a loop that ended days or weeks ago used to be injected UNCONDITIONALLY —
+    # resumed as though it were this session's own live state, with no age check at all.
+    #
+    # NOT resolved via scripts/loop-checkpoint.mjs (a first version of this fix did, and shipped
+    # tests/unit/payload-self-contained.test.mjs RED: loop-checkpoint.mjs lives only at repo-root
+    # scripts/, never inside plugin/scripts/, and only `plugin/` reaches a real install — every
+    # shipped layout flattens it, so that reference resolved to nothing everywhere except this
+    # repo's own dogfood checkout, and the feature silently degraded to "always inject" for every
+    # real user). The 24h threshold is instead inlined here as `node -e`, no file reference at all —
+    # payload-self-contained by construction. scripts/loop-checkpoint.mjs's own exported
+    # CHECKPOINT_STALE_MS (used by scripts/single-source-check.mjs's E1 audit) is the SOURCE OF
+    # TRUTH for the number; tests/unit/ground-ruvnet-staleness-inline.test.mjs asserts this literal
+    # matches it, same drift-test idiom as Gate 1's own bash/JS pattern copy.
+    STALE_RC=9
+    STALE_AGE=""
+    if command -v node >/dev/null 2>&1; then
+      UPDATED_AT=$(node -e '
+        let raw = ""; process.stdin.on("data", (c) => { raw += c; });
+        process.stdin.on("end", () => {
+          try { const cp = JSON.parse(raw); process.stdout.write(typeof cp.updatedAt === "string" ? cp.updatedAt : ""); }
+          catch { /* empty stdout: not a valid checkpoint */ }
+        });
+      ' < "$CP_FILE" 2>/dev/null)
+      if [ -n "$UPDATED_AT" ]; then
+        STALE_AGE=$(node -e '
+          const STALE_MS = 24 * 60 * 60 * 1000;
+          const ms = Date.parse(process.argv[1]);
+          if (!Number.isFinite(ms)) process.exit(2);
+          const ageMs = Date.now() - ms;
+          if (ageMs < STALE_MS) process.exit(0);
+          process.stdout.write(String(Math.floor(ageMs / 86_400_000)));
+          process.exit(1);
+        ' "$UPDATED_AT" 2>/dev/null)
+        STALE_RC=$?
+      else
+        STALE_RC=2
+      fi
+    fi
+    if [ "$STALE_RC" -eq 1 ]; then
+      echo "[RuvNet Brain — a stale checkpoint (age ${STALE_AGE} days) was ignored; starting fresh rather than resuming a plan that old.]"
+    else
+      # RC 0 (fresh) — inject as intended. RC 2 (no parseable `updatedAt`) or RC 9 (no node on this
+      # host) both mean "unknown age", which must never be treated as PROVEN stale — fall back to
+      # the pre-fix behavior of injecting rather than silently dropping a checkpoint we cannot judge.
+      echo "[RuvNet Brain — RESUME: your prior checkpoint. Continue from 'next'; do not repeat done work.]"
+      cat "$CP_FILE" 2>/dev/null
+      echo ""
+    fi
   fi
 fi
 

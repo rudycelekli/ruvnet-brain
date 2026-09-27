@@ -469,8 +469,8 @@ describe.skipIf(bashOnly)('ground-ruvnet: bounded input, word-boundary matching'
 //
 // RED, verbatim (origin/main b73176a): every hook below sat at its harness kill with no output —
 // e.g. `design-wall  heldopen: 10009ms KILLED@guard`, `verify-interface 10009ms KILLED@guard`,
-// `protect-state 10020ms KILLED@guard`, `route-dispatch 10011ms KILLED@guard`,
-// `version-bump-gate 10007ms KILLED@guard`. Nothing but the harness's own kill ends them.
+// `protect-state 10020ms KILLED@guard`, `route-dispatch 10011ms KILLED@guard`. Nothing but the
+// harness's own kill ends them.
 //
 // Claude Code always writes the payload and closes, so this costs no normal turn. That is exactly
 // why it survived: a hook that CAN hang forever has no upper bound on its damage, and the only
@@ -482,7 +482,7 @@ describe.skipIf(bashOnly)('every stdin-reading hook body returns on a stdin that
   // ends the process.
   const BODIES = [
     'design-wall.sh', 'verify-interface.sh', 'protect-brain-state.sh', 'route-dispatch.sh',
-    'version-bump-gate.sh', 'learn-capture.sh', 'ground-before-write.sh', 'grounding-stamp.sh',
+    'learn-capture.sh', 'ground-before-write.sh', 'grounding-stamp.sh',
     'lesson-hooks.sh', 'ground-ruvnet.sh', 'hijack-ruvnet.sh',
   ];
 

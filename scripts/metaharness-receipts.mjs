@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { CLAUDE_MODEL_IDS } from './route-cheap.mjs';
 
 export function receiptsPath() {
   return (
@@ -61,7 +62,7 @@ export function formatTable(rows) {
     r.source === 'claude-subagent' ? 'subagent' : r.source === 'calibration' ? 'calibrate' : 'openrouter',
     r.task_class || '?',
     r.model,
-    r.frontier_ref || 'claude-opus-4.8',
+    r.frontier_ref || CLAUDE_MODEL_IDS.opus,
     fmt$(r.est_cost ?? 0),
     fmt$(r.est_frontier_cost ?? 0),
     fmt$(r.saved),
@@ -79,7 +80,7 @@ export function formatTable(rows) {
   const pct = totalFrontier > 0 ? Math.round((totalSaved / totalFrontier) * 100) : 0;
 
   // Baselines now vary per row; name them all rather than picking one and implying it covers everything.
-  const baselines = [...new Set(rows.map((r) => r.frontier_ref || 'claude-opus-4.8'))].join(', ');
+  const baselines = [...new Set(rows.map((r) => r.frontier_ref || CLAUDE_MODEL_IDS.opus))].join(', ');
   const timedTotal = rows.reduce((s, r) => s + (typeof r.duration_ms === 'number' && r.duration_ms > 0 ? r.duration_ms : 0), 0);
   const timedRows = rows.filter((r) => typeof r.duration_ms === 'number' && r.duration_ms > 0).length;
   // TIME as a percentage, like cost — "20 seconds" is trivia; "~40% faster" is the message

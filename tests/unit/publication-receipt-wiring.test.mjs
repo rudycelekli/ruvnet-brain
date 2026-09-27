@@ -112,4 +112,23 @@ describe('publication receipt wiring', () => {
     expect(source.replace(guard, '')).not.toMatch(guard);
     expect(source).toMatch(guard);
   });
+
+  it('MUTANT: a timed-out canary search must never reach parseRetrievalResult unguarded', () => {
+    // The real production failure ("retrieval canary acceptance failed for claude") was exactly
+    // this: searchInstalled() handed a timed-out result.mcpResult straight to
+    // parseRetrievalResult(), which throws the generic "incompatible MCP response" message instead
+    // of surfacing the timeout. Prove the guard exists and sits BEFORE the parse call — deleting it
+    // (the mutant) must make this test fail.
+    const fn = producer.slice(producer.indexOf('async searchInstalled({'));
+    const body = fn.slice(0, fn.indexOf('\n    },\n\n    async resolveInstalledCitation'));
+    const guardIndex = position(body, "if (result.error || !result.mcpResult || (Object.hasOwn(result, 'status') && result.status !== 0))");
+    const parseIndex = position(body, 'return parseRetrievalResult(result.mcpResult, { query, k });');
+    expect(guardIndex, 'the guard must run before the parse call it protects').toBeLessThan(parseIndex);
+    expect(body).toContain('installed Brain search failed for');
+    // Sabotage: with the guard stripped, the parse call is reachable straight from the search —
+    // the exact shape of the bug that shipped.
+    const mutant = body.slice(0, guardIndex) + body.slice(body.indexOf('return parseRetrievalResult'));
+    expect(mutant).not.toContain('installed Brain search failed for');
+    expect(mutant).toContain('return parseRetrievalResult(result.mcpResult, { query, k });');
+  });
 });

@@ -11,6 +11,29 @@ import path from 'node:path';
 import { getVersion, getVersionTag } from './version.mjs';
 
 export const RVF_GENERATIONS_FILE = 'RVF-GENERATIONS.json';
+export const RUNTIME_LEDGER_KIND = 'ruvnet-brain-runtime-generation-ledger';
+
+// S4 (ONE PROVENANCE RECORD) — RECONCILING THE TWO "schemaVersion 2" MEANINGS.
+//
+// Two independent writers had drifted into calling different shapes "schemaVersion 2":
+//   "Schema A" — THIS module's writeRvfGeneration wrote schemaVersion 1, no `kind`, no
+//     `sourceSnapshot`, one store touched per call (the dev-time incremental refresh ledger).
+//   "Schema B" — scripts/build-bundle.mjs's projectStoreViews independently writes
+//     `{ schemaVersion: 2, kind: 'ruvnet-brain-runtime-generation-ledger', brainVersion,
+//     releaseTag, sourceSnapshot, stores }` (the release-time ledger) — and
+//     plugin/scripts/coverage-integrity.mjs's release validation ALREADY requires exactly this
+//     shape (`schemaVersion !== 2` / `kind !== 'ruvnet-brain-runtime-generation-ledger'` are hard
+//     failures there, confirmed by reading it directly) for the tree an installed brain carries.
+// Schema B is the one kept: it is a strict superset (Schema A's per-store row shape is a subset
+// of Schema B's), and it is what the release-time validator already enforces on every installed
+// tree. Schema A is retired: writeRvfGeneration below now emits Schema B's envelope, carrying
+// `sourceSnapshot` forward from whatever the ledger already had (null until a release build sets
+// it — build-bundle.mjs's own construction is untouched and still wins at release time; this
+// module's schemaVersion bump changes nothing downstream, since nothing reads the dev-time
+// ledger's schemaVersion — verified against every consumer: validateSelectedRvfGenerations/
+// verifyRvfGenerations below check individual fields, never schemaVersion; build-bundle.mjs
+// reads the dev-time ledger via readRvfGenerations only to look up per-store rows by name, then
+// constructs ITS OWN new ledger object from scratch).
 
 export function canonicalRvfStores(dir) {
   return fs.readdirSync(dir)
@@ -42,7 +65,8 @@ export function sha256File(file) {
 export function readRvfGenerations(dir) {
   const file = path.join(dir, RVF_GENERATIONS_FILE);
   if (!fs.existsSync(file)) {
-    return { schemaVersion: 1, brainVersion: getVersion(), releaseTag: getVersionTag(), stores: {} };
+    return { schemaVersion: 2, kind: RUNTIME_LEDGER_KIND, brainVersion: getVersion(),
+      releaseTag: getVersionTag(), sourceSnapshot: null, stores: {} };
   }
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   parsed.stores ||= {};
@@ -56,15 +80,22 @@ export function writeRvfGeneration({
   model,
   dimensions,
   sourceCommit = null,
+  sourceRepo = null,
+  sourceDescribe = null,
   builtUtc = new Date().toISOString(),
   previousDir = dir,
 }) {
   const rvfPath = path.join(dir, rvfFile);
   if (!fs.existsSync(rvfPath)) throw new Error(`cannot stamp missing RVF: ${rvfPath}`);
   const manifest = readRvfGenerations(previousDir);
-  manifest.schemaVersion = 1;
+  manifest.schemaVersion = 2;
+  manifest.kind = RUNTIME_LEDGER_KIND;
   manifest.brainVersion = getVersion();
   manifest.releaseTag = getVersionTag();
+  // Carried forward, never invented here: this is the git sha of the CODE checkout that
+  // assembles a release (build-bundle.mjs's projectStoreViews sets it fresh at release time).
+  // The dev-time incremental refresh this function serves does not know that value yet.
+  manifest.sourceSnapshot = manifest.sourceSnapshot ?? null;
   manifest.stores[store] = {
     file: rvfFile,
     sha256: sha256File(rvfPath),
@@ -72,10 +103,45 @@ export function writeRvfGeneration({
     model,
     dimensions,
     sourceCommit,
+    // S4 (ONE PROVENANCE RECORD): the repo identity a SOURCE.json entry needs, carried alongside
+    // the byte identity this ledger has always recorded, so SOURCE.json can be projected entirely
+    // FROM this ledger (projectSourceStore below) rather than a caller's own second copy of the
+    // same facts. Optional and omitted (not written as null) so a caller that does not pass them
+    // gets a ledger row with no dangling nulls.
+    ...(sourceRepo !== null ? { sourceRepo } : {}),
+    ...(sourceDescribe !== null ? { sourceDescribe } : {}),
     builtUtc,
   };
   fs.writeFileSync(path.join(dir, RVF_GENERATIONS_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest.stores[store];
+}
+
+/**
+ * Project ONE SOURCE.json store entry from its ledger row — the ONE place identity fields
+ * (sourceRepo, sourceCommit, sourceDescribe, builtUtc) are read FROM the ledger rather than
+ * independently recomputed by a caller (S4: ONE PROVENANCE RECORD).
+ *
+ * Deliberately minimal: it projects ONLY the identity fields the ledger itself carries.
+ * `updater` supplies every NON-identity field a caller's SOURCE.json shape wants
+ * (canonicalManifestUrl, canonicalBundleUrl, selfUpdate, builder, updateManaged, origin, …) —
+ * spread first so identity fields read from `generation` always win, the same adapter pattern
+ * scripts/build-bundle.mjs's projectStoreViews already uses for the release-time case ("only its
+ * non-identity updater fields are borrowed per store; sourceCommit/builtUtc are always bound from
+ * the selected generation record, never independently trusted from the updater's own copy"). This
+ * function does not default those non-identity fields itself: a public-bundle store and a private
+ * overlay store want genuinely different shapes (a private store has no selfUpdate command at
+ * all, since forge-update.mjs never fetches it) — each caller states what IT needs.
+ */
+export function projectSourceStore(name, generation, updater = {}) {
+  if (!generation) throw new Error(`projectSourceStore: no ledger generation record for ${name}`);
+  return {
+    ...updater,
+    kbName: updater.kbName || name,
+    sourceRepo: generation.sourceRepo ?? updater.sourceRepo ?? null,
+    sourceCommit: generation.sourceCommit ?? null,
+    sourceDescribe: generation.sourceDescribe ?? updater.sourceDescribe ?? null,
+    builtUtc: generation.builtUtc,
+  };
 }
 
 export function verifyRvfGenerations(dir, {
