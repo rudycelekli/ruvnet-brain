@@ -1,0 +1,16 @@
+#!/bin/sh
+# Self-heals the convergence manifest so a commit can never carry a stale one. Twice on
+# 2026-09-27 (v4.3.30, v4.3.31) a commit was created with data/convergence-manifest.json out of
+# date with the rest of the tree being committed -- once because a source fix landed in a
+# separate commit after the manifest was written, once because the manifest was regenerated
+# before a new file was `git add`ed (so `git ls-files` could not see it yet). Both times CI
+# caught it minutes later on every OS in parallel: cheap to prevent locally, expensive to
+# discover remotely. This hook regenerates the manifest against the CURRENT tree immediately
+# before every commit and re-stages it, so the two can never drift apart again.
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+[ -f scripts/convergence-manifest.mjs ] || exit 0
+node scripts/convergence-manifest.mjs >/dev/null 2>&1 && exit 0
+node scripts/convergence-manifest.mjs --write
+git add data/convergence-manifest.json
