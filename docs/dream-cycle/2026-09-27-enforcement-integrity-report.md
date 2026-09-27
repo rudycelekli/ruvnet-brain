@@ -80,19 +80,26 @@ regression-pinning mechanism for this exact defect class). Target: a single conc
   `no-silent-substitution.mjs` or `entrypoint-symlink.test.mjs`; failure signature
   (`sqlite3`/`@xenova/transformers`/native-module/ruflo-global container gaps) matches PR #317's
   documented baseline from 5 days ago byte-for-byte (same 9 files/23 tests).
-- `npx vitest run tests/unit` (5796 tests, full suite, run twice — both runs identical:
-  17 failed files/52 failed tests/5559 passed/47 skipped/138 todo). Full failed-file list from the
-  second, fully-captured run: `adr-format` (2 failures, both in ADR-0089/0090 — files this diff never
+- `npx vitest run tests/unit` (5796 tests): first two runs, taken while this branch's own
+  `data/convergence-manifest.json` was stale (see CI correction below), showed 17 failed
+  files/52 failed tests/5559 passed, `convergence-manifest.test.mjs` among them — **self-caused,
+  not pre-existing**: this branch's own diff (the ADR-0057/0058 edits + the new report file) changed
+  tracked source without regenerating the committed manifest. CI (`qualify-development` /
+  `release-source-identity`) failed on this exact defect and was the actual catch, not this session's
+  own local check — reproduced independently on a clean checkout of this branch's tip, confirmed
+  `origin/main` itself unaffected, fixed via `npm run convergence:write` (a separate commit on this
+  PR), and re-run to completion a third time post-fix: **16 failed files/51 failed tests/5560
+  passed/47 skipped/138 todo** — `convergence-manifest.test.mjs` now passes, everything else
+  unchanged, exactly matching PR #317's documented 5-day-old baseline byte-for-byte. Full failed-file
+  list from the corrected run: `adr-format` (2 failures, both in ADR-0089/0090 — files this diff never
   touches), `advocacy-ignored`, `advocacy-outcomes`, `advocacy-route`, `agentic-qe-early-public`,
-  `candidate-retrieval-matrix`, `console-memory-canonical-store` (4), `convergence-manifest`,
-  `corpus-accuracy-gate`, `corpus-customer-promotion`, `corpus-seed-release-authority`,
-  `doc-currency` (fails on ADR-0013's pre-existing lag, not ADR-0057/0058), `hook-shim-fallback-once`,
-  `no-restated-truth`, `rehearse-corpus-pipeline`, `retrieval-canary`, `user-settings`.
-  Grep-confirmed: **zero of the 17 failing files reference `no-silent-substitution.mjs` or
-  `entrypoint-symlink.test.mjs`**. All are pre-existing container/repo-state conditions dated to the
-  2026-09-19 recovery commit (missing native deps, stale generated manifests, stale ADRs this diff
-  does not touch) — reproduced identically across two consecutive runs, i.e. deterministic, not a
-  regression this candidate introduced.
+  `candidate-retrieval-matrix`, `console-memory-canonical-store` (4), `corpus-accuracy-gate`,
+  `corpus-customer-promotion`, `corpus-seed-release-authority`, `doc-currency` (fails on ADR-0013's
+  pre-existing lag, not ADR-0057/0058), `hook-shim-fallback-once`, `no-restated-truth`,
+  `rehearse-corpus-pipeline`, `retrieval-canary`, `user-settings`. Grep-confirmed: zero of these 16
+  reference `no-silent-substitution.mjs` or `entrypoint-symlink.test.mjs`; all are pre-existing
+  container/repo-state conditions dated to the 2026-09-19 recovery commit (missing native deps, stale
+  unrelated ADRs), independently verified against a clean `origin/main` checkout, not merely asserted.
 - `npm run claims:verify`: 3 PASS / 4 SKIP, identical composition to every prior documented night.
 - `npm run eval:gate`: `EVALUATED=blocked` — `no brain at /root/.cache/ruvnet-brain/kb` (this
   container never materializes a corpus; confirmed independently, `stores 0 dark 0`).
@@ -131,6 +138,14 @@ the cases the old guard silently skipped — no new write path, network call, or
 introduced. Same remediation direction as PR #295/#317 and the general Node.js symlink-resolution
 guidance those reports cite; the implementation itself is this repo's own, already-six-times-applied
 `isDirectInvocation()` pattern.
+
+**Self-caught process note, not hidden**: this session's first evaluation pass mischaracterized the
+`convergence-manifest.test.mjs` unit-test failure (and the underlying `data/convergence-manifest.json`
+staleness) as pre-existing container state. It was not — it was this branch's own diff going stale
+against its own committed manifest. CI (`qualify-development`) caught it, not this session's own local
+check, which had been run against an already-dirty working tree. Fixed via a separate, clearly-labeled
+commit (`npm run convergence:write`) once CI surfaced it; this report and the ledger row were corrected
+afterward to match. Recorded here rather than silently editing the earlier claim away.
 
 ## Scan Findings
 
@@ -171,8 +186,8 @@ explicit `Content-Type: application/json` header; not assumed, not fabricated �
 
 ```
 SESSION_COMMIT = e89ea1ba167d9252ec99910304f534c8da5ca0ab
-REPORT_HASH    = f695e409b68b8ea65f0521b27240e1bae743c50189b16ba13dcc80c3b1c2bf12
-WITNESS        = fc41929743cc3ac472dcb46b2e12da5cc9792c98ce1f0ed9ba4c87950aadb479
+REPORT_HASH    = afecc32a58b1adfa4af5eba9d7b94aa2e23d58522d03edddd5dd75e77f4eabc2
+WITNESS        = 2424b620b6bd48cc96cc6c4164228da7c6b7082d6f5e3de863e5cdfb6d078398
 ```
 
 5-step verifier procedure, reproducible by anyone with this repo checked out at `e89ea1ba`:
@@ -180,9 +195,11 @@ WITNESS        = fc41929743cc3ac472dcb46b2e12da5cc9792c98ce1f0ed9ba4c87950aadb47
 1. Check out commit `e89ea1ba167d9252ec99910304f534c8da5ca0ab`.
 2. Retrieve this report as committed at `docs/dream-cycle/2026-09-27-enforcement-integrity-report.md`
    (byte-identical to this gist except this Witness section, which is filled in after the hash is
-   computed, per STEP 16).
+   computed, per STEP 16). This report was re-stamped once, after an earlier draft's Evaluation
+   Receipt mischaracterized a self-caused CI failure as pre-existing (see the Security Review note);
+   the commit that carries this exact pre-stamp text is this PR's re-stamp commit.
 3. `sha256sum` the report file *as it existed before this Witness section was filled in* (i.e. with
-   the placeholder text) — reproduces `REPORT_HASH` above. The PR's first commit carries the
+   the placeholder text) — reproduces `REPORT_HASH` above. The PR's re-stamp commit carries the
    pre-stamp version for this purpose.
 4. `printf '%s%s' REPORT_HASH SESSION_COMMIT | sha256sum` — reproduces `WITNESS` above.
 5. Confirm `SESSION_COMMIT` is reachable from `origin/main` (or is `origin/main`'s own tip at the
