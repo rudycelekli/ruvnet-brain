@@ -32,7 +32,9 @@ import { runStorageTransaction, treeIdentity, managedStorageInventory, storageDe
 import { pruneLifecycleEvidence } from './lifecycle-evidence-retention.mjs';
 import {
   isCorpusReleaseTag, assertCorpusReleaseCompatible, readInstalledRuntime,
-  recordCorpusTransportIdentity, readRejectedRelease, writeRejectedRelease, clearRejectedRelease,
+  recordCorpusTransportIdentity, recordCorpusGenerationIdentity,
+  readRejectedRelease, writeRejectedRelease, clearRejectedRelease,
+  releaseKind, parseCorpusGeneration,
 } from './corpus-release-identity.mjs';
 
 const KB_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -41,10 +43,20 @@ const SOURCE_PATH = path.join(KB_DIR, 'SOURCE.json');
 const argv = process.argv.slice(2);
 const APPLY = argv.includes('--apply');
 const RESTORE_COMPLETE = argv.includes('--restore-complete');
+// `--staged-release <descriptor.json>` is the private-overlay recovery rail's own entry point
+// (applyVerifiedStagedRelease, invoked by bin/install.mjs when the normal --apply flow above cannot
+// complete). It bypasses main() and this module's own SOURCE.json/canonicalManifestUrl bootstrap
+// entirely — discovery is supplied by the descriptor, not read from this KB tree.
+const stagedReleaseIndex = argv.indexOf('--staged-release');
+const STAGED_RELEASE_FILE = stagedReleaseIndex >= 0 && argv[stagedReleaseIndex + 1]
+  ? path.resolve(argv[stagedReleaseIndex + 1]) : null;
 const resultFileIndex = argv.indexOf('--result-file');
 const RESULT_FILE = resultFileIndex >= 0 && argv[resultFileIndex + 1]
   ? path.resolve(argv[resultFileIndex + 1]) : (process.env.RUVNET_UPDATE_RESULT ? path.resolve(process.env.RUVNET_UPDATE_RESULT) : null);
-const optionValueIndexes = new Set(resultFileIndex >= 0 ? [resultFileIndex + 1] : []);
+const optionValueIndexes = new Set([
+  ...(resultFileIndex >= 0 ? [resultFileIndex + 1] : []),
+  ...(stagedReleaseIndex >= 0 ? [stagedReleaseIndex + 1] : []),
+]);
 const ONLY = argv.find((a, index) => !a.startsWith('--') && !optionValueIndexes.has(index));
 
 /**
@@ -116,6 +128,23 @@ function writeUpdateOutcome(outcome) {
   return finalOutcome;
 }
 
+// `--check` is a deliberately lightweight, side-effect-free poll: no lock, no rollback preflight, no
+// candidate ever built. writeUpdateOutcome() cannot be reused for it — that function always runs
+// pruneLifecycleEvidence() (a real filesystem GC pass) and references updateLock/legacyBackupRetention,
+// both of which are apply-only concepts. This records ONLY the currency verdict, and only when the
+// caller actually asked for a result (--result-file / RUVNET_UPDATE_RESULT) — matching --check's
+// existing "does nothing unless asked" contract. S2: this is what lets --apply, bin/install.mjs, and
+// the session-start banner read the SAME recorded verdict a --check run (e.g. the SessionStart
+// heartbeat's detached poll) already produced, instead of each re-deriving their own comparison.
+function writeCheckOutcome(outcome) {
+  const finalOutcome = { schemaVersion: 1, kind: 'ruvnet-brain-check-result', mode: 'check',
+    recordedAt: new Date().toISOString(), ...outcome };
+  if (!RESULT_FILE) return finalOutcome;
+  fs.mkdirSync(path.dirname(RESULT_FILE), { recursive: true });
+  atomicJson(RESULT_FILE, finalOutcome);
+  return finalOutcome;
+}
+
 export function acquireUpdateLock({ kbDir = KB_DIR, pid = process.pid, isAlive } = {}) {
   return acquireRefreshLock({ kbDir, brainHome: path.dirname(path.resolve(kbDir)), action: 'update', pid,
     ...(isAlive === undefined ? {} : { isAlive }) });
@@ -161,13 +190,19 @@ function die(msg, code = 1) {
   process.exit(code);
 }
 
-if (!fs.existsSync(SOURCE_PATH)) {
+if (!fs.existsSync(SOURCE_PATH) && !STAGED_RELEASE_FILE) {
   die(`no SOURCE.json next to this script (${SOURCE_PATH}). This bundle predates the evergreen ` +
       `mechanism or SOURCE.json was removed. Re-download a current bundle to gain self-update.`);
 }
 let source;
-try { source = JSON.parse(fs.readFileSync(SOURCE_PATH, 'utf8')); }
-catch (e) { die(`SOURCE.json is unreadable/corrupt: ${e.message}`); }
+try { source = fs.existsSync(SOURCE_PATH) ? JSON.parse(fs.readFileSync(SOURCE_PATH, 'utf8')) : {}; }
+catch (e) {
+  // --staged-release never reads this module-level `source` (its own descriptor supplies liveDir/
+  // stagedDir explicitly); a corrupt SOURCE.json in whatever directory happens to be current when
+  // this script is invoked as a plain recovery executable must not block that rail.
+  if (!STAGED_RELEASE_FILE) die(`SOURCE.json is unreadable/corrupt: ${e.message}`);
+  source = {};
+}
 
 // The RELEASE TAG IS A PROPERTY OF THE BUNDLE, and every store inside it shares that tag (issue
 // #108 bug 2). It is written once, at the top level of SOURCE.json; the per-store entries never
@@ -248,7 +283,12 @@ function sha256File(file) {
 }
 
 async function loadTrustedCoverageValidator() {
-  const validatorPath = path.join(KB_DIR, 'coverage-integrity.mjs');
+  // The recovery rail (applyVerifiedStagedRelease) can run from the installer's OWN repo checkout
+  // (bin/install.mjs's `REPO_ROOT/kb/forge-update.mjs`) rather than an installed KB tree, where the
+  // validator lives at its source location (plugin/scripts/) instead of beside this script.
+  const validatorPath = fs.existsSync(path.join(KB_DIR, 'coverage-integrity.mjs'))
+    ? path.join(KB_DIR, 'coverage-integrity.mjs')
+    : path.join(path.dirname(KB_DIR), 'plugin', 'scripts', 'coverage-integrity.mjs');
   if (!fs.existsSync(validatorPath)) {
     throw new Error('installed coverage validator is missing; re-run the current installer before self-update');
   }
@@ -275,6 +315,142 @@ function validateReleaseCoverageTree(root, validateCoverageDirectory, expectedVe
     catch (error) { return { valid: false, failures: [`SOURCE.json is unreadable: ${error.message}`] }; }
   }
   return validateCoverageDirectory(root, { expectedVersion });
+}
+
+/**
+ * THE PRIVATE-OVERLAY RECOVERY RAIL. Apply an already-authenticated release staged by the installer
+ * (bin/install.mjs's stageBundleForRecovery), for installations whose embedded canonicalManifestUrl
+ * is dead/missing or whose own updater otherwise cannot complete `main()`'s normal --apply flow.
+ * Discovery (which release, which bytes) is supplied by the caller; trust and activation remain
+ * owned by this package.
+ *
+ * ONE APPLY PATH (S1/S2): this reuses the exact same primitives main() uses for a normal apply —
+ * runStorageTransaction for the atomic candidate/rollback swap, restorePrivateFilesIntoCandidate for
+ * copying the private overlay onto the candidate, and recordCorpusTransportIdentity/
+ * recordCorpusGenerationIdentity for the currency stamps — rather than a second, parallel
+ * implementation of "how a private overlay survives an apply." It exists as a SEPARATE ENTRY POINT
+ * because it solves a different problem (recovery when the normal polling path cannot run at all,
+ * not a routine currency check), not because it needs its own apply mechanics.
+ */
+export async function applyVerifiedStagedRelease({
+  stagedDir, liveDir, bundlePath, signaturePath, transactionId = `${Date.now()}-${process.pid}`,
+  trustedRuntimeDir = KB_DIR, expectedRuntimeVersion = null, releaseTag = null, corpusGeneration = null,
+  bundleSha256 = null, packageIdentity = null, stageReceiptPath = `${stagedDir}.staged-release.json`,
+  validateCoverageDirectory = null,
+}) {
+  const staged = path.resolve(stagedDir);
+  const live = path.resolve(liveDir);
+  if (!bundlePath || !signaturePath) throw new Error('staged recovery requires bundle and detached signature paths');
+  const signature = verifyDownloadedBundle(path.resolve(bundlePath), path.resolve(signaturePath));
+  if (!signature.ok) throw new Error(`staged release signature verification failed: ${signature.reason}`);
+  const actualBundleSha256 = sha256File(path.resolve(bundlePath));
+  if (bundleSha256 && actualBundleSha256 !== bundleSha256) {
+    throw new Error(`staged release bundle digest ${actualBundleSha256} differs from sealed identity ${bundleSha256}`);
+  }
+  if (packageIdentity != null && typeof packageIdentity !== 'string') {
+    throw new Error('staged recovery packageIdentity must be an immutable string');
+  }
+  if (!expectedRuntimeVersion || typeof expectedRuntimeVersion !== 'string') {
+    throw new Error('staged recovery requires the expected approved runtime version');
+  }
+  if (path.resolve(trustedRuntimeDir) !== KB_DIR) {
+    throw new Error('staged recovery trust root must be the executing package root');
+  }
+  const stageReceiptFile = path.resolve(stageReceiptPath);
+  if (!fs.existsSync(stageReceiptFile)) throw new Error('staged recovery authentication receipt is missing');
+  const stageReceipt = JSON.parse(fs.readFileSync(stageReceiptFile, 'utf8'));
+  if (stageReceipt.bundleSha256 !== actualBundleSha256) {
+    throw new Error('staged recovery directory is not bound to the signed bundle');
+  }
+  // The receipt is diagnostic only: bind the candidate cryptographically by independently
+  // extracting the authenticated archive and comparing the complete staged tree identity.
+  const proofRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ruvnet-staged-proof-'));
+  try {
+    await extractZip(path.resolve(bundlePath), proofRoot);
+    const nested = path.join(proofRoot, 'ruvnet-brain');
+    if (fs.existsSync(path.join(nested, 'forge-mcp-all.mjs'))) {
+      for (const entry of fs.readdirSync(nested)) fs.renameSync(path.join(nested, entry), path.join(proofRoot, entry));
+      fs.rmdirSync(nested);
+    }
+    const trustedValidator = fs.existsSync(path.join(KB_DIR, 'coverage-integrity.mjs')) ? path.join(KB_DIR, 'coverage-integrity.mjs')
+      : path.join(path.dirname(KB_DIR), 'plugin', 'scripts', 'coverage-integrity.mjs');
+    fs.copyFileSync(trustedValidator, path.join(proofRoot, 'coverage-integrity.mjs'));
+    const runtimeIdentity = path.join(live, 'RUNTIME-IDENTITY.json');
+    if (fs.existsSync(runtimeIdentity)) fs.copyFileSync(runtimeIdentity, path.join(proofRoot, 'RUNTIME-IDENTITY.json'));
+    if (releaseTag) recordCorpusTransportIdentity(proofRoot, { releaseTag });
+    // Validator/runtime identity are installer-owned bindings added after extraction. Compare the
+    // authenticated archive projection while excluding those two local files.
+    const archiveIdentity = (root) => {
+      const identity = treeIdentity(root);
+      const entries = identity.entries.filter((entry) => !['coverage-integrity.mjs', 'RUNTIME-IDENTITY.json'].includes(entry.path));
+      return { sha256: createHash('sha256').update(JSON.stringify(entries)).digest('hex'),
+        bytes: entries.reduce((sum, entry) => sum + (entry.bytes || 0), 0), fileCount: entries.filter((e) => e.type === 'file').length };
+    };
+    const stagedIdentity = archiveIdentity(staged);
+    const proofIdentity = archiveIdentity(proofRoot);
+    if (stagedIdentity.sha256 !== proofIdentity.sha256 || stagedIdentity.bytes !== proofIdentity.bytes || stagedIdentity.fileCount !== proofIdentity.fileCount) {
+      throw new Error('staged recovery directory bytes differ from independently extracted signed bundle');
+    }
+  } finally { fs.rmSync(proofRoot, { recursive: true, force: true }); }
+  for (const [dir, label] of [[staged, 'staged release'], [live, 'live KB']]) {
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} is not a trusted directory: ${dir}`);
+  }
+  const validator = validateCoverageDirectory || await loadTrustedCoverageValidator();
+  const stagedCoverage = validateReleaseCoverageTree(staged, validator, expectedRuntimeVersion);
+  if (!stagedCoverage.valid) throw new Error(`staged ReleaseCoverage failed integrity: ${stagedCoverage.failures.join('; ')}`);
+  const liveSource = JSON.parse(fs.readFileSync(path.join(live, 'SOURCE.json'), 'utf8'));
+  const liveStores = Array.isArray(liveSource.stores)
+    ? liveSource.stores
+    : Object.entries(liveSource.stores || {}).map(([kbName, value]) => ({ kbName, ...value }));
+  const overlay = capturePrivateOverlayState({ kbDir: live, allStores: liveStores });
+  const prepareCandidate = ({ candidateDir, liveDir }) => {
+    for (const name of ['coverage-integrity.mjs']) {
+      const trusted = fs.existsSync(path.join(KB_DIR, name)) ? path.join(KB_DIR, name)
+        : path.join(path.dirname(KB_DIR), 'plugin', 'scripts', name);
+      if (!fs.existsSync(trusted)) throw new Error(`trusted staged recovery runtime file is missing: ${name}`);
+      const trustedStat = fs.lstatSync(trusted);
+      if (!trustedStat.isFile() || trustedStat.isSymbolicLink()) throw new Error(`trusted staged recovery runtime file is not a regular package file: ${name}`);
+      fs.copyFileSync(trusted,
+        assertNoFollowPath(candidateDir, path.join(candidateDir, name)));
+    }
+    const runtimeIdentity = path.join(liveDir, 'RUNTIME-IDENTITY.json');
+    if (!fs.existsSync(runtimeIdentity)) throw new Error('trusted staged recovery runtime file is missing: RUNTIME-IDENTITY.json');
+    const runtime = JSON.parse(fs.readFileSync(runtimeIdentity, 'utf8'));
+    if (runtime.brainVersion !== expectedRuntimeVersion) throw new Error('installed runtime identity differs from the approved recovery runtime');
+    fs.copyFileSync(assertNoFollowPath(liveDir, runtimeIdentity),
+      assertNoFollowPath(candidateDir, path.join(candidateDir, 'RUNTIME-IDENTITY.json')));
+    const privateFence = path.join(liveDir, 'PRIVATE-STORES.json');
+    if (fs.existsSync(privateFence)) fs.copyFileSync(privateFence,
+      assertNoFollowPath(candidateDir, path.join(candidateDir, 'PRIVATE-STORES.json')));
+    // S1: ONE APPLY PATH — the same helper main()'s normal apply uses, not a second, duplicated
+    // copy-loop. It also adds the collision refusal main() previously lacked.
+    restorePrivateFilesIntoCandidate({ candidateDir, sourceDir: liveDir, overlay });
+    if (releaseTag) {
+      recordCorpusTransportIdentity(candidateDir, { releaseTag });
+      // S2: stamped atomically alongside the transport tag, exactly as main()'s prepareCandidate
+      // does. This recovery rail's caller does not currently thread a parsed corpus-generation value
+      // through (bin/install.mjs's resolveRelease() does not expose the release body it would come
+      // from) — passing null here is not a loss of safety: recordCorpusGenerationIdentity's own
+      // no-generation branch clears any stale stamp, so the NEXT ordinary --check/--apply reads
+      // UNKNOWN (apply allowed, never wrongly REFUSED, never wrongly CURRENT) rather than comparing
+      // against a generation this recovered tree does not actually carry.
+      recordCorpusGenerationIdentity(candidateDir, { corpusReleaseTag: releaseTag, generation: corpusGeneration });
+    }
+    const result = validateReleaseCoverageTree(candidateDir, validator, expectedRuntimeVersion);
+    if (!result.valid) throw new Error(`candidate public/private convergence failed: ${result.failures.join('; ')}`);
+  };
+  const validate = ({ dir }) => {
+    const result = validateReleaseCoverageTree(dir, validator, expectedRuntimeVersion);
+    return result.valid ? { valid: true, failures: [] } : result;
+  };
+  const lock = acquireUpdateLock({ kbDir: live });
+  try {
+    const transaction = runStorageTransaction({ liveDir: live, sourceDir: staged, transactionId,
+      prepareCandidate, validateCandidate: validate, validateLive: validate });
+    return { ...transaction, stagedRelease: { bundleSha256: actualBundleSha256,
+      packageIdentity, expectedRuntimeVersion, releaseTag } };
+  } finally { releaseUpdateLock(lock); }
 }
 
 function validateProfiledReleaseTree(root, profile, overlay) {
@@ -502,6 +678,47 @@ export function restorePrivateOverlayState({ kbDir, overlay }) {
   return { restored: Object.keys(overlay.sourceStores).length };
 }
 
+/**
+ * ONE APPLY PATH (S1): copy the captured private overlay's artifact files from `sourceDir` (the
+ * live tree, still untouched at this point) onto `candidateDir` (the sibling tree
+ * `runStorageTransaction` builds from the freshly extracted public bundle), then restore the
+ * private registry entries with `restorePrivateOverlayState`.
+ *
+ * This is the ONLY place production code copies private files into a tree that is about to become
+ * live — `bin/install.mjs` and `kb/forge-update.mjs`'s `main()` both call this from inside
+ * `prepareCandidate`, before `runStorageTransaction` ever renames anything into place. There used to
+ * be a second, parallel implementation (`applyPublicBundlePreservingPrivate`) that operated on a
+ * full-tree copy-then-restore-from-backup model; it was never wired into `main()` — the real apply
+ * path already used `runStorageTransaction`'s rename-based candidate/rollback machinery — so it was
+ * exercised only by its own tests. Deleted rather than kept "for coverage": a second apply path that
+ * production code never calls is not a safety net, it is a second implementation to keep in sync
+ * (and the one place it silently diverged from the real path is the collision check below, which
+ * the real path had NOT been enforcing).
+ *
+ * Collision detection matters here specifically because it did not previously exist on the real
+ * path: `candidateDir` already holds the extracted public bundle's files (built by
+ * `fs.cpSync(sourceDir=extractDir, candidateDir, ...)` before `prepareCandidate` runs), so copying a
+ * private file over a same-named public one would silently discard the public bytes. Refusing BEFORE
+ * copying anything is the assertion `applyPublicBundlePreservingPrivate` had and the real path did
+ * not; it is preserved here rather than dropped.
+ */
+export function restorePrivateFilesIntoCandidate({ candidateDir, sourceDir, overlay }) {
+  if (!overlay) return { restored: 0 };
+  for (const relative of Object.keys(overlay.files || {})) {
+    const target = assertNoFollowPath(candidateDir, path.join(candidateDir, relative));
+    if (fs.existsSync(target)) {
+      throw new Error(`public bundle collides with private file ${relative}; refusing to copy`);
+    }
+    const source = assertNoFollowPath(sourceDir, path.join(sourceDir, relative));
+    if (!fs.existsSync(source) || !fs.lstatSync(source).isFile()) {
+      throw new Error(`private source file is missing or not regular: ${relative}`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
+  return restorePrivateOverlayState({ kbDir: candidateDir, overlay });
+}
+
 const manifestUrl = source.canonicalManifestUrl || stores.find((s) => s.canonicalManifestUrl)?.canonicalManifestUrl;
 if (!manifestUrl) {
   die(`self-update not configured for this build — SOURCE.json has no canonicalManifestUrl ` +
@@ -560,25 +777,109 @@ function canonicalFor(canon, kbName) {
     corpusReleaseTag: null,
   };
 }
-export function isBehind(local, canon) {
-  // CORPUS TRANSPORT IDENTITY FIRST, and compared only against itself. A corpus release's tag says
-  // nothing about the runtime version stamped in `releaseTag`, so the two must never meet in a
-  // string compare. Same corpus tag = this brain already holds those exact bytes. A local copy with
-  // no corpus tag at all has never taken a corpus release, so the first one genuinely IS new.
-  if (canon.corpusReleaseTag) {
-    return canon.corpusReleaseTag !== local.corpusReleaseTag;
+/** The installed tree's own currency identity, read from its top-level SOURCE.json (`source`). */
+export function installedCurrencyIdentity(src) {
+  return {
+    releaseTag: (src && typeof src.releaseTag === 'string' && src.releaseTag) || null,
+    corpusReleaseTag: (src && typeof src.corpusReleaseTag === 'string' && src.corpusReleaseTag) || null,
+    corpusGeneration: (src && typeof src.corpusGeneration === 'string' && src.corpusGeneration) || null,
+  };
+}
+
+/**
+ * The CANDIDATE's currency identity, derived from the live manifest/Release payload `main()` already
+ * fetched — BEFORE any download. `--check` never downloads, so this is the only data a verdict can
+ * ever be computed from pre-download; `--apply` deliberately reuses this exact same decision rather
+ * than a second, download-time comparison (the same "decide once, from the live fetch" discipline
+ * `resolveBundleUrl`/`verifyLanded` already apply elsewhere in this file).
+ */
+export function candidateCurrencyIdentity(canon) {
+  if (!isGithubReleasePayload(canon)) {
+    // A forge `.last-built.json` or SOURCE.json-shaped manifest (shapes 1/2 — see the comment above
+    // `isGithubReleasePayload`). Neither carries a code or corpus release tag, so there is no ordering
+    // key to compare by. This project in practice ships shape 3 only.
+    return { kind: 'other', tag: null, corpusReleaseTag: null, corpusGeneration: null, corpusGenerationEpoch: null };
   }
-  // Release-tag identity is AUTHORITATIVE when both sides carry a tag. The publish time of a
-  // Release is later than when the store was forged, so timestamps would always (falsely) read
-  // "behind" — the tag is the truth: same tag = up to date, different tag = behind.
-  if (canon.releaseTag && local.releaseTag) {
-    return canon.releaseTag !== local.releaseTag;
+  const tag = canon.tag_name;
+  const kind = releaseKind(tag);
+  // The generation ordering key travels in the release's own body/notes — the same
+  // `Corpus generation:` line scripts/corpus-promotion.mjs already treats as the sole author-side
+  // ordering key for `releases/latest` promotion (never a locally-observed timestamp). `canon` is
+  // already the live, freshly-fetched Release payload from GitHub's API, the same trust boundary this
+  // file already extends to `canon.tag_name`/`canon.assets[]` — reusing its `body` field costs no
+  // extra network round trip and is available to `--check`, which never downloads the archive itself.
+  const parsed = kind === 'corpus' ? parseCorpusGeneration(canon.body) : null;
+  return {
+    kind,
+    tag: tag || null,
+    corpusReleaseTag: kind === 'corpus' ? tag : null,
+    corpusGeneration: parsed ? parsed.value : null,
+    corpusGenerationEpoch: parsed ? parsed.epoch : null,
+  };
+}
+
+/**
+ * ONE CURRENCY VERDICT (S2). Replaces isBehind()'s three ad hoc fallback tiers (releaseTag ->
+ * builtUtc -> sourceCommit) with one explicit decision per release channel, made from an ordering key
+ * — NEVER a locally-observed timestamp. isBehind()'s builtUtc/sourceCommit tiers compared the
+ * candidate's PRE-FETCH manifest timestamp (a Release's publish time, always later than the KB inside
+ * it was forged) against the installed copy's own forge time — the exact redownload loop measured in
+ * this file's header and in kb/corpus-release-identity.mjs's header. That comparison is deleted
+ * outright here, not preserved as a fallback tier.
+ *
+ * @param {{releaseTag: string|null, corpusReleaseTag: string|null, corpusGeneration: string|null}} installed
+ * @param {{kind: 'code'|'corpus'|'other', tag: string|null, corpusReleaseTag: string|null, corpusGeneration: string|null, corpusGenerationEpoch: number|null}} candidate
+ * @returns {{verdict: 'CURRENT'|'UPDATE_AVAILABLE'|'UNKNOWN'|'REFUSED', reason: string}}
+ *
+ *   CURRENT           the candidate is exactly what is already installed.
+ *   UPDATE_AVAILABLE  the candidate genuinely supersedes what is installed.
+ *   UNKNOWN           no ordering key can be verified in either direction — e.g. today's 4.3.22-era
+ *                     installs, which carry no corpus generation stamp at all. NEVER refused, NEVER
+ *                     reported current: apply is allowed to proceed (main() treats it exactly like
+ *                     UPDATE_AVAILABLE for control flow; only the RECORDED verdict differs).
+ *   REFUSED           the candidate is a corpus generation strictly OLDER than the one installed —
+ *                     rollback protection. main() leaves the live tree untouched and exits 0.
+ */
+export function currencyVerdict(installed, candidate) {
+  if (candidate.kind === 'code') {
+    if (candidate.tag && candidate.tag === installed.releaseTag) {
+      return { verdict: 'CURRENT', reason: `code release ${candidate.tag} is already installed` };
+    }
+    // A code release supersedes whatever is installed, corpus or code — its bundle IS the corpus
+    // (recordCorpusTransportIdentity's own rationale). Code tags are owner-sequenced semver, not a
+    // content address, so there is no "candidate is older" ambiguity to protect against here.
+    return { verdict: 'UPDATE_AVAILABLE',
+      reason: `code release ${candidate.tag || '(unknown)'} supersedes ${installed.releaseTag || '(none)'}` };
   }
-  const lt = local.builtUtc ? Date.parse(local.builtUtc) : NaN;
-  const ct = canon.builtUtc ? Date.parse(canon.builtUtc) : NaN;
-  if (!Number.isNaN(lt) && !Number.isNaN(ct) && ct > lt) return true;
-  if (local.sourceCommit && canon.sourceCommit && local.sourceCommit !== canon.sourceCommit) return true;
-  return false;
+  if (candidate.kind === 'corpus') {
+    if (candidate.tag && candidate.tag === installed.corpusReleaseTag) {
+      return { verdict: 'CURRENT', reason: `corpus generation ${candidate.tag} is already installed` };
+    }
+    if (installed.corpusGeneration == null) {
+      return { verdict: 'UNKNOWN',
+        reason: 'installed tree carries no verifiable corpus generation stamp; cannot prove direction' };
+    }
+    const installedEpoch = Date.parse(installed.corpusGeneration);
+    if (!Number.isFinite(installedEpoch)) {
+      return { verdict: 'UNKNOWN', reason: 'installed corpus generation stamp is unparseable' };
+    }
+    if (candidate.corpusGeneration == null) {
+      // The candidate's own published record carries no readable ordering key — fall back to
+      // transport identity. Tag equality was already ruled out above, so a differing tag is still
+      // real evidence that something changed.
+      return { verdict: 'UPDATE_AVAILABLE',
+        reason: `candidate ${candidate.tag} carries no generation identity; falling back to transport tag (differs from installed ${installed.corpusReleaseTag || '(none)'})` };
+    }
+    if (candidate.corpusGenerationEpoch < installedEpoch) {
+      return { verdict: 'REFUSED',
+        reason: `candidate corpus generation ${candidate.corpusGeneration} predates installed generation ${installed.corpusGeneration} — refusing to move backward` };
+    }
+    return { verdict: 'UPDATE_AVAILABLE',
+      reason: `corpus generation ${candidate.corpusGeneration} supersedes installed ${installed.corpusGeneration}` };
+  }
+  // No recognizable release identity at all — never fall back to a locally-observed builtUtc/
+  // sourceCommit timestamp (the exact bug this function replaces).
+  return { verdict: 'UNKNOWN', reason: 'candidate carries no recognizable release identity (neither a code tag nor a corpus tag)' };
 }
 function short(s) { return s ? String(s).slice(0, 12) : '(none)'; }
 function stamp() { return new Date().toISOString().replace(/[:.]/g, '-'); }
@@ -609,59 +910,6 @@ function copyTree(srcDir, dstDir, root = dstDir, prefix = '') {
     const s = path.join(srcDir, ent.name), d = assertNoFollowPath(root, path.join(dstDir, ent.name));
     if (ent.isDirectory()) { if (!fs.existsSync(d)) fs.mkdirSync(d); copyTree(s, d, root, relative); }
     else { if (!fs.existsSync(path.dirname(d))) fs.mkdirSync(path.dirname(d), { recursive: true }); fs.copyFileSync(s, d); }
-  }
-}
-
-function restoreTreeExact(srcDir, dstDir, root = dstDir, prefix = '') {
-  assertNoFollowPath(root, dstDir);
-  if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir);
-  const sourceNames = new Set(fs.readdirSync(srcDir));
-  for (const name of fs.readdirSync(dstDir)) {
-    const target = assertNoFollowPath(root, path.join(dstDir, name));
-    if (!sourceNames.has(name)) fs.rmSync(target, { recursive: true, force: true });
-  }
-  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) throw new Error(`backup contains a symbolic link: ${path.join(prefix, entry.name)}`);
-    const source = path.join(srcDir, entry.name);
-    const target = assertNoFollowPath(root, path.join(dstDir, entry.name));
-    if (entry.isDirectory()) {
-      if (fs.existsSync(target) && !fs.lstatSync(target).isDirectory()) fs.rmSync(target, { force: true });
-      if (!fs.existsSync(target)) fs.mkdirSync(target);
-      restoreTreeExact(source, target, root, path.join(prefix, entry.name));
-    } else {
-      if (fs.existsSync(target) && fs.lstatSync(target).isDirectory()) fs.rmSync(target, { recursive: true, force: true });
-      fs.copyFileSync(source, target);
-    }
-  }
-}
-
-/** Apply a public bundle while preserving private metadata; restore the full backup on failure. */
-export function applyPublicBundlePreservingPrivate({ extractDir, kbDir, backupPath, overlay }) {
-  const privateFiles = new Set(Object.keys(overlay?.files || {}));
-  const collision = relativeFiles(extractDir).find((relative) => privateFiles.has(relative));
-  if (collision) throw new Error(`public bundle collides with private file ${collision}; refusing to copy`);
-  try {
-    // The public bundle is an exact tree, not an overlay. Overlay copies kept retired scripts,
-    // stale policies, and removed RVFs alive indefinitely. Replace the governed tree exactly,
-    // then restore only the explicitly captured private overlay from the pre-update snapshot.
-    restoreTreeExact(extractDir, kbDir);
-    for (const relative of privateFiles) {
-      const source = assertNoFollowPath(backupPath, path.join(backupPath, relative));
-      const target = assertNoFollowPath(kbDir, path.join(kbDir, relative));
-      if (!fs.existsSync(source) || !fs.lstatSync(source).isFile()) {
-        throw new Error(`private backup file is missing or not regular: ${relative}`);
-      }
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(source, target);
-    }
-    return restorePrivateOverlayState({ kbDir, overlay });
-  } catch (error) {
-    try {
-      restoreTreeExact(backupPath, kbDir);
-    } catch (rollbackError) {
-      throw new Error(`${error.message}; automatic rollback also failed: ${rollbackError.message}`);
-    }
-    throw new Error(`${error.message}; restored pre-update bytes from ${backupPath}`);
   }
 }
 
@@ -1284,10 +1532,38 @@ async function main() {
   console.log(`canonical manifest: ${manifestUrl}`);
   console.log(`canonical built:    ${canonLabel}\n`);
 
+  // ── ONE CURRENCY VERDICT (S2) ──────────────────────────────────────────────────────────────────
+  // Computed ONCE for the whole bundle, from data already fetched — before a single byte of the
+  // archive is downloaded. --check, --apply, and every store within a single run share this exact
+  // decision (bundleIdentity() already established that every store in a release shares its identity;
+  // the mixed-generation refusal a few lines below enforces that the resolved download target agrees).
+  const installedIdentity = installedCurrencyIdentity(source);
+  const candidateIdentity = candidateCurrencyIdentity(canon);
+  const verdict = RESTORE_COMPLETE
+    ? { verdict: 'UPDATE_AVAILABLE', reason: '--restore-complete forces a full profile restore' }
+    : currencyVerdict(installedIdentity, candidateIdentity);
+  console.log(`currency verdict:   ${verdict.verdict} — ${verdict.reason}\n`);
+
+  // REFUSED is rollback protection: the candidate is a corpus generation strictly OLDER than what is
+  // installed. Nothing is downloaded, the live tree is untouched, and this is a clean success (exit
+  // 0) in BOTH modes — never exit 10, which would invite --apply into refusing again.
+  if (verdict.verdict === 'REFUSED') {
+    console.log(`REFUSED — ${verdict.reason}`);
+    console.log('Nothing was downloaded; the live brain is untouched.');
+    const refusedOutcome = APPLY
+      ? writeUpdateOutcome({ terminalVerdict: 'refused', reason: verdict.reason,
+        currencyVerdict: verdict.verdict, currencyReason: verdict.reason, candidateKind: candidateIdentity.kind,
+        storeCount: targets.length })
+      : writeCheckOutcome({ currencyVerdict: verdict.verdict, currencyReason: verdict.reason,
+        candidateKind: candidateIdentity.kind, storeCount: targets.length });
+    if (refusedOutcome?.terminalVerdict === 'recovery-required') die(refusedOutcome.reason);
+    process.exit(0);
+  }
+
   let anyBehind = false; const behindStores = [];
   for (const local of targets) {
     const c = canonicalFor(canon, local.kbName);
-    const behind = RESTORE_COMPLETE || isBehind(local, c);
+    const behind = verdict.verdict !== 'CURRENT';
     anyBehind = anyBehind || behind;
     if (behind) {
       behindStores.push({ local });
@@ -1300,6 +1576,8 @@ async function main() {
   }
 
   if (!APPLY) {
+    writeCheckOutcome({ currencyVerdict: verdict.verdict, currencyReason: verdict.reason,
+      candidateKind: candidateIdentity.kind, storeCount: targets.length });
     if (anyBehind) { console.log(`\nA newer build exists. Run:  node forge-update.mjs --apply`); process.exit(10); }
     console.log(`\nAll stores current. Nothing to do.`); process.exit(0);
   }
@@ -1316,6 +1594,7 @@ async function main() {
     // No transaction paths are created: the inventory still counts every retained managed copy.
     const measuredDelta = storageDelta({ live: KB_DIR }, { prior: inventoryBefore.active, inventoryBefore });
     const noopOutcome = writeUpdateOutcome({ terminalVerdict: 'noop', reason: 'already-current', storeCount: targets.length,
+      currencyVerdict: verdict.verdict, currencyReason: verdict.reason, candidateKind: candidateIdentity.kind,
       storageDelta: measuredDelta,
       phaseEvidence: phaseEvidenceFor({ root: KB_DIR, terminalVerdict: 'noop', storageDelta: measuredDelta }) });
     if (noopOutcome?.terminalVerdict === 'recovery-required') die(noopOutcome.reason);
@@ -1451,19 +1730,20 @@ async function main() {
           fs.copyFileSync(assertNoFollowPath(liveDir, liveRuntimeIdentity),
             assertNoFollowPath(candidateDir, path.join(candidateDir, 'RUNTIME-IDENTITY.json')));
         }
-        for (const relative of Object.keys(privateOverlay?.files || {})) {
-          const sourceFile = assertNoFollowPath(liveDir, path.join(liveDir, relative));
-          const targetFile = assertNoFollowPath(candidateDir, path.join(candidateDir, relative));
-          fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-          fs.copyFileSync(sourceFile, targetFile);
-        }
-        restorePrivateOverlayState({ kbDir: candidateDir, overlay: privateOverlay });
+        restorePrivateFilesIntoCandidate({ candidateDir, sourceDir: liveDir, overlay: privateOverlay });
         // ATOMIC WITH INSTALLATION, not after it. The transport identity is written INTO the
         // candidate, so the storage transaction's single rename either promotes the bytes AND the
         // record of where they came from, or promotes neither. A crash here cannot leave a tree
         // whose contents and whose declared provenance disagree — which is the whole reason this is
         // not a second write against the live tree once the swap has happened.
-        if (canonTag) recordCorpusTransportIdentity(candidateDir, { releaseTag: canonTag });
+        if (canonTag) {
+          recordCorpusTransportIdentity(candidateDir, { releaseTag: canonTag });
+          // S2: the generation ordering key is stamped ATOMICALLY alongside the transport tag — same
+          // candidate directory, same single rename into place. A crash between the two can never
+          // leave a tree whose transport tag and generation ordering key disagree.
+          recordCorpusGenerationIdentity(candidateDir, { corpusReleaseTag: canonTag,
+            generation: candidateIdentity.corpusGeneration });
+        }
         const fullCoverage = validateReleaseCoverageTree(candidateDir, validateCoverageDirectory, installedRuntimeVersion);
         if (!fullCoverage.valid) throw new Error(`candidate public/private convergence failed: ${fullCoverage.failures.join('; ')}`);
         if (activeProfile !== 'complete') profileResult = applyBrainProfile(candidateDir, activeProfile, { preserveStores: privateNames });
@@ -1549,6 +1829,7 @@ async function main() {
     console.log(`  (stores are forged independently — an unchanged store means its upstream repo did not move, not a failed update.)`);
   }
   const finalOutcome = writeUpdateOutcome({ terminalVerdict: transaction.terminalVerdict, storeCount: behindStores.length,
+    currencyVerdict: verdict.verdict, currencyReason: verdict.reason, candidateKind: candidateIdentity.kind,
     storageDelta: transaction.storageDelta,
     transactionReceipts: transaction.paths.receipts,
     bundleSha256: createHash('sha256').update(buf).digest('hex'),
@@ -1567,4 +1848,10 @@ async function main() {
 // a process.exit() inside whatever imported it. (Found exactly that way: the reclaim test's import
 // began racing a real update against the test run.)
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (invokedDirectly) main().catch((e) => die(`unexpected: ${e.message}`));
+if (invokedDirectly && STAGED_RELEASE_FILE) {
+  (async () => {
+    const input = JSON.parse(fs.readFileSync(STAGED_RELEASE_FILE, 'utf8'));
+    const result = await applyVerifiedStagedRelease(input);
+    console.log(JSON.stringify({ schemaVersion: 1, kind: 'ruvnet-brain-staged-recovery', ...result }));
+  })().catch((e) => die(`staged recovery failed: ${e.message}`));
+} else if (invokedDirectly) main().catch((e) => die(`unexpected: ${e.message}`));

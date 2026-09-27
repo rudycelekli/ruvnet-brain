@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { HOST_WARMUP_TIMEOUT_MS, RELEASE_SEARCH_DEADLINE_MS, SELF_STORE_PROOF_QUERY,
+import { HOST_WARMUP_TIMEOUT_MS, PREWARM_POOL_SIZE, RELEASE_SEARCH_DEADLINE_MS, SELF_STORE_PROOF_QUERY,
   resolveInstalledMcpServer, runHostMatrixAsync } from '../../scripts/host-install-matrix.mjs';
 import { getVersion } from '../../scripts/version.mjs';
 
@@ -102,7 +102,7 @@ describe('host install matrix cold-model orchestration', () => {
       expect(prewarm).toContain('--repos');
       expect(prewarm[prewarm.indexOf('--repos') + 1]).toBe('ruvnet-brain');
       expect(prewarm).toContain('--pool');
-      expect(prewarm[prewarm.indexOf('--pool') + 1]).toBe('8');
+      expect(prewarm[prewarm.indexOf('--pool') + 1]).toBe(String(PREWARM_POOL_SIZE));
       expect(phases.slice(4).filter((phase) => phase === 'warmup')).toHaveLength(3);
       expect(phases.slice(4).filter((phase) => phase === 'search')).toHaveLength(3);
       for (const mode of ['claude', 'codex', 'dual']) {

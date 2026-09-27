@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { TRI_HOST_MODEL_IDS } from './review-model-defaults.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DUAL = path.join(ROOT, 'dual-host-deliberation.mjs');
@@ -24,9 +25,8 @@ if (!task) { usage(); process.exit(2); }
 
 if (dryRun) {
   const providers = mode === 'dual' ? ['claude', 'codex'] : ['claude', 'codex', 'grok'];
-  console.log(JSON.stringify({ status: 'ready', mode, providers, models: {
-    claude: 'claude-fable-5-1', codex: 'gpt-6-astra', grok: 'grok-4.6',
-  }, billingPath: 'native subscription/OAuth CLI; API-key variables unset', taskHash: task.length }, null, 2));
+  console.log(JSON.stringify({ status: 'ready', mode, providers, models: TRI_HOST_MODEL_IDS,
+    billingPath: 'native subscription/OAuth CLI; API-key variables unset', taskHash: task.length }, null, 2));
   process.exit(0);
 }
 

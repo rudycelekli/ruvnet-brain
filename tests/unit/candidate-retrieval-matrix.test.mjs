@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runHostMatrixAsync } from '../../scripts/host-install-matrix.mjs';
+import { runHostMatrixAsync, RELEASE_SEARCH_QUERY, SELF_STORE_PROOF_QUERY } from '../../scripts/host-install-matrix.mjs';
 import { candidateRetrievalFixture } from '../fixtures/candidate-retrieval-fixture.mjs';
 import { groundedToolResult } from '../../kb/grounded-response.mjs';
 
@@ -27,9 +27,16 @@ async function run({ fail = '', legacyCount = 1, actualRpc = false } = {}) {
       return ok('smoke');
     },
     resolveMcpServer: ({ home }) => actualRpc ? path.resolve('tests/fixtures/candidate-canary-mcp.mjs') : path.join(home, 'installed.mjs'),
-    verifyGrounding: async (output) => ({ grounded: !(actualRpc && fail === 'grounding' && output !== 'smoke'), receipt: { path: 'fixture' } }),
+    // repo: 'ruvnet-brain' is required by runHostMatrixAsync's warmup self-store check
+    // (host-install-matrix.mjs: `warmupGrounding.receipt?.repo !== 'ruvnet-brain'`), added when the
+    // warmup phase itself landed. Without it every run fails before retrieval canaries ever execute.
+    verifyGrounding: async (output) => ({ grounded: !(actualRpc && fail === 'grounding' && output !== 'smoke'), receipt: { path: 'fixture', repo: 'ruvnet-brain' } }),
     runMcpSearch: actualRpc ? undefined : async ({ query, k, env }) => {
-      if (!query) return ok('smoke');
+      // The warmup self-store probe and the pre-canary release-search grounding check (both added
+      // alongside the warmup phase) query fixed, well-known strings that never appear in the
+      // candidate's own canary plan — answer them as plain smoke checks, the same as the `!query`
+      // case below, rather than looking them up as a canary case.
+      if (!query || query === SELF_STORE_PROOF_QUERY || query === RELEASE_SEARCH_QUERY) return ok('smoke');
       requests.push({ k, kb: env.RUVNET_BRAIN_KB });
       const c = fixture.plan.cases.find((row) => row.query === query);
       if (fail === 'unknown') throw new Error('fixture search failed');

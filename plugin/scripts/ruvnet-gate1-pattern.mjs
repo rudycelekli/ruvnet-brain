@@ -27,3 +27,20 @@ export const RUVNET_GATE1_PATTERN =
 export function ruvnetGate1Matches(text) {
   return new RegExp(RUVNET_GATE1_PATTERN, 'i').test(String(text ?? ''));
 }
+
+/**
+ * H1 / GitHub #316: the plain substring vocabulary mechanically derived from RUVNET_GATE1_PATTERN —
+ * one lowercased term per `|`-separated alternative, with the `\b` word-boundary anchors stripped
+ * (irrelevant to a substring scan) and the one optional-plural alternative ("swarms?") reduced to
+ * its shortest substring-safe form ("swarm", which is a substring of both "swarm" and "swarms").
+ *
+ * This is the ONE vocabulary grounding-stamp.sh's GATE1_ONLY_TERMS must mirror byte-for-byte
+ * (tests/unit/grounding-stamp-terms.test.mjs enforces it, same idiom as
+ * tests/unit/ruvnet-gate1-pattern.test.mjs's byte-identity check against ground-ruvnet.sh). Before
+ * that fix, grounding-stamp.sh hard-coded its own narrower 9-term list that omitted `ruvnet` itself
+ * — so a search literally about "ruvnet" minted no stamp and grounding-turn-gate.mjs's Stop-time
+ * check wrongly reported "no successful search_ruvnet call this turn".
+ */
+export const RUVNET_GATE1_TERMS = RUVNET_GATE1_PATTERN
+  .split('|')
+  .map((alt) => alt.replace(/\\b/g, '').replace(/s\?$/, '').toLowerCase());

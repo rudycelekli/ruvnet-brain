@@ -17,8 +17,10 @@ import { promoteArtifactSet } from '../kb/incremental-refresh.mjs';
 import { rebuildCorpusAggregates } from './corpus-aggregates.mjs';
 import { assertCapabilityOnlyStore, isCapabilityOnly, CAPABILITY_RETIRED_SUFFIXES } from '../kb/capability-only.mjs';
 import { fileIdentity } from '../plugin/scripts/coverage-integrity.mjs';
+import { readDiagnosticAccuracyReport } from './oracle/retrieval-accuracy.mjs';
 import { storeRoot } from '../kb/store-root.mjs';
 import { captureGistSources } from './gist-receipts.mjs';
+import { projectSourceStore } from './rvf-generation.mjs';
 
 export { rebuildCorpusAggregates };
 
@@ -540,7 +542,13 @@ export async function executeReconciliation({
       promotedFiles.push(file.name);
     }
     mergedLedger.stores[result.store] = result.generation;
-    mergedSource.stores[result.store] = result.source;
+    // S4 (ONE PROVENANCE RECORD): re-project the merged SOURCE.json entry FROM the merged ledger
+    // row rather than trusting the worker's own already-written SOURCE.json fragment verbatim —
+    // the merge boundary is where multiple workers' results combine, so it is the right place to
+    // assert "the ledger is the source of truth" rather than assume every worker upheld it.
+    // `result.source` (validateWorkerOutput's read of the worker's own output, already checked
+    // there to bind the exact upstream SHA) supplies the non-identity updater fields unchanged.
+    mergedSource.stores[result.store] = projectSourceStore(result.store, result.generation, result.source);
   }
   mergedLedger.stores = Object.fromEntries(Object.entries(mergedLedger.stores).sort(([a], [b]) => a.localeCompare(b)));
   mergedSource.stores = Object.fromEntries(Object.entries(mergedSource.stores).sort(([a], [b]) => a.localeCompare(b)));
@@ -766,12 +774,33 @@ export function prepareCorpusCandidate({
   // bounded run (--stores/--sample) still writes a report, but it marks itself incomplete and the
   // seal refuses it, so a bounded measurement can never be presented as a corpus-wide pass.
   const accuracyReportFile = `${bundleFile}.accuracy.json`;
-  checked(run, process.execPath, [accuracyScript, '--bundle', bundleFile,
+  // A stale leftover report from a prior run must never be mistaken for a fresh measurement of
+  // THIS bundle -- delete it before invoking the script so only a report the script just wrote
+  // (or none at all) can be found below.
+  fs.rmSync(accuracyReportFile, { force: true });
+  const accuracyResult = run(process.execPath, [accuracyScript, '--bundle', bundleFile,
     '--oracle', accuracyOracle, '--out', accuracyReportFile,
     ...(accuracyStores != null ? ['--stores', String(accuracyStores)] : []),
     ...(accuracySample != null ? ['--sample', String(accuracySample)] : []),
     ...(accuracyTimeoutMs != null ? ['--timeout-ms', String(accuracyTimeoutMs)] : [])],
-  { stdio: 'inherit' });
+  { stdio: 'inherit' }) || {};
+  // C3 was demoted to a non-blocking diagnostic on 2026-09-15 (commit a20727b7, ADR-086
+  // amendment) -- every other caller (corpus-candidate.mjs, release.mjs, corpus-seed.yml) reads
+  // it through readDiagnosticAccuracyReport, which checks the report's integrity/archive binding,
+  // never its score. A nonzero exit here is therefore NOT immediately fatal: it may just mean the
+  // measured score fell below the (no-longer-enforced) threshold. What stays fatal is a CRASHED
+  // measurement -- no valid report bound to this exact archive was produced at all.
+  if (accuracyResult.error || accuracyResult.status !== 0) {
+    let diagnostic;
+    try {
+      diagnostic = readDiagnosticAccuracyReport({ reportFile: accuracyReportFile, archive: fileIdentity(bundleFile) });
+    } catch (error) {
+      fail(`retrieval-accuracy diagnostic (C3) crashed with no valid report to show for it: ${error.message}`);
+    }
+    console.log(`[corpus-reconcile] C3 retrieval-accuracy diagnostic scored below its (non-blocking) `
+      + `threshold: state=${diagnostic.state} classification=${diagnostic.classification} `
+      + `totals=${JSON.stringify(diagnostic.totals)} -- continuing, C3 is advisory only.`);
+  }
   // THE BLOCKING RETRIEVAL GATE (ADR-086 amendment 2026-09-15). Same placement and same discipline
   // as the C3 run above — the EXTRACTED final archive through the customer query path — but this is
   // the measurement that can refuse a candidate. It asks the 194 frozen human questions, one per
