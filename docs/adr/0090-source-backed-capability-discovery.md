@@ -35,6 +35,8 @@ Created: 2026-09-19
 
 # ADR-090 — Additive source-verified capability discovery
 
+**Status**: Accepted (2026-09-19)
+
 ## Context
 
 Broad requests such as “store embeddings in this project without running a server” and “carry

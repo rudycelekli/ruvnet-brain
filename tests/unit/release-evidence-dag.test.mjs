@@ -61,9 +61,12 @@ describe('same-run release evidence DAG', () => {
     expect(checkOnly).toBeGreaterThan(-1);
     expect(transaction).toBeGreaterThan(checkOnly);
     const sourceGates = release.slice(checkOnly, transaction);
-    expect(sourceGates).toContain("runOrDie('npm test'");
-    expect(sourceGates).toContain("runOrDie('vitest unit'");
+    // scripts/release-qualification.mjs is the SAME gate CI enforces (canonical-qa.yml/ci.yml
+    // invoke it the same way); check-only mode is a local preview of that one contract, not a
+    // second, independently-maintained test list.
+    expect(sourceGates).toContain("['scripts/release-qualification.mjs', '--suite', 'source'");
     expect(sourceGates).toContain("runOrDie('version sync'");
+    expect(sourceGates).toContain("runOrDie('one protected publisher'");
     expect(release).not.toContain("runOrDie('git push'");
     expect(release).not.toContain('fetchLatestCiVerdict');
   });
@@ -76,6 +79,9 @@ describe('same-run release evidence DAG', () => {
     expect(provider).not.toContain('publication.postPublicationChecks');
     expect(workflow).toContain('node scripts/public-verification-lane.mjs');
     expect(workflow).toContain('node scripts/public-verification-finalizer.mjs');
-    expect(release).toContain("if (!PUBLISH) {\n  step('E'");
+    // Live public-byte verification never lived in check-only mode's own source gates either — the
+    // local verify-channels.mjs walk that used to run here was removed 2026-09-26 as part of
+    // collapsing check-only onto the one CI-enforced qualification contract (see the test above).
+    expect(release).not.toContain("'scripts/verify-channels.mjs'");
   });
 });

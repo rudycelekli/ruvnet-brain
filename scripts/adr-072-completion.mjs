@@ -4,9 +4,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { verifyCapabilityClaimAggregate } from '../plugin/scripts/capability-claim-evidence.mjs';
+import { LEGACY_REVIEW_MODEL_IDS } from './review-model-defaults.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const REQUIRED_REVIEWERS = Object.freeze(['claude-fable-5', 'gpt-5.6-sol']);
+const REQUIRED_REVIEWERS = LEGACY_REVIEW_MODEL_IDS;
 
 const command = (cwd, bin, args) => {
   const result = spawnSync(bin, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });

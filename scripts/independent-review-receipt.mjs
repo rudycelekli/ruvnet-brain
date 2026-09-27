@@ -5,12 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson, digest } from './coverage-integrity.mjs';
 import { transactionIdFor } from './release-transaction.mjs';
+import { CLAUDE_FABLE_5_ID, GPT_5_6_SOL_ID, LEGACY_REVIEWER_IDENTITIES } from './review-model-defaults.mjs';
 const HEX40 = /^[a-f0-9]{40}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-export const ALLOWED_INDEPENDENT_REVIEWERS = Object.freeze([
-  Object.freeze({ identity: 'claude-fable-5', model: 'claude-fable-5', provider: 'firstParty' }),
-  Object.freeze({ identity: 'gpt-5.6-sol', model: 'gpt-5.6-sol', provider: 'openai' })]);
+export const ALLOWED_INDEPENDENT_REVIEWERS = LEGACY_REVIEWER_IDENTITIES;
 
 const INPUT_KEYS = Object.freeze([
   'artifactSha256', 'deductions', 'execution', 'findings', 'id', 'independent', 'model', 'payloadId',
@@ -222,17 +221,17 @@ function reviewerFor(input) {
 }
 
 function normalizeExecution(execution, reviewer) {
-  const required = reviewer.identity === 'gpt-5.6-sol'
+  const required = reviewer.identity === GPT_5_6_SOL_ID
     ? ['catalogRowSha256', 'invocationDigest', 'subscriptionAuthenticated', 'threadId']
     : ['invocationDigest', 'subscriptionAuthenticated'];
-  if (reviewer.identity === 'gpt-5.6-sol'
+  if (reviewer.identity === GPT_5_6_SOL_ID
     && (!Object.hasOwn(execution || {}, 'threadId') || !Object.hasOwn(execution || {}, 'catalogRowSha256'))) {
     throw new Error('GPT review thread and catalog evidence are required');
   }
   exactKeys(execution, required, 'review execution');
   if (execution.subscriptionAuthenticated !== true) throw new Error('review execution is not subscription authenticated');
   hex(execution.invocationDigest, HEX64, 'review invocation digest');
-  if (reviewer.identity === 'gpt-5.6-sol') {
+  if (reviewer.identity === GPT_5_6_SOL_ID) {
     text(execution.threadId, 'GPT review thread');
     hex(execution.catalogRowSha256, HEX64, 'GPT review catalog row');
   }
@@ -479,8 +478,8 @@ export function main(args = process.argv.slice(2), runtime = {}) {
       readJson(options['--sol'], 'Sol review receipt')];
     const ordered = validateIndependentReviewPair(receipts, {
       publicKeysByReviewer: {
-        'claude-fable-5': readRegular(options['--fable-public-key'], 'Fable review public key'),
-        'gpt-5.6-sol': readRegular(options['--sol-public-key'], 'Sol review public key'),
+        [CLAUDE_FABLE_5_ID]: readRegular(options['--fable-public-key'], 'Fable review public key'),
+        [GPT_5_6_SOL_ID]: readRegular(options['--sol-public-key'], 'Sol review public key'),
       },
       expectedIdentity: options['--expected-identity']
         ? readJson(options['--expected-identity'], 'expected review identity') : null,

@@ -227,6 +227,14 @@ export function productSchedulerVerdict(status) {
   return { ...base, state: mapped, detail: run.evidence };
 }
 
+/** ONE update owner per machine (CONTRIBUTING.md § The knowledge corpus). agentic-kit removes the
+ *  Brain's own scheduler by design and updates through `ak sync`, which the registry watches as
+ *  com.stuartkerr.ak-sync — so on such a machine the Brain scheduler is not expected to exist. */
+export function brainUpdateOwnedByAgenticKit(home = os.homedir()) {
+  try { return JSON.parse(fs.readFileSync(path.join(home, '.config', 'agentic-kit', 'kit.json'), 'utf8')).ruvnetBrain === true; }
+  catch { return false; }
+}
+
 const loadState = () => { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch { return {}; } };
 const saveState = (s) => { fs.mkdirSync(path.dirname(STATE), { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s, null, 2)); };
 
@@ -253,9 +261,9 @@ async function main() {
   const json = process.argv.includes('--json');
   const quiet = process.argv.includes('--quiet');
   const brainHome = process.env.RUVNET_BRAIN_HOME || path.join(os.homedir(), '.cache', 'ruvnet-brain');
-  const results = [...checkAll(new Date()), productSchedulerVerdict(schedulerStatus({
+  const results = [...checkAll(new Date()), ...(brainUpdateOwnedByAgenticKit() ? [] : [productSchedulerVerdict(schedulerStatus({
     brainHome, kbDir: process.env.RUVNET_BRAIN_KB || path.join(brainHome, 'kb'),
-  }))];
+  }))])];
   const bad = results.filter((r) => r.state !== OK);
 
   const prev = loadState();

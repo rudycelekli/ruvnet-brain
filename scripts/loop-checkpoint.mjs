@@ -15,6 +15,9 @@
 //   check  → evaluate stop conditions. Exit codes are the protocol:
 //              0 = continue      3 = DONE (doneCriteria command exited 0)
 //              4 = NO-PROGRESS stop (two strikes)      2 = usage/state error
+//   stale  → is `updatedAt` too old to trust (H3, ADR-0011 Phase 1's stale-resume gap)? Exit codes:
+//              0 = fresh (safe to resume)      1 = stale (stdout: age in whole days)
+//              2 = unknown (no checkpoint, or no parseable updatedAt — never treated as fresh OR stale)
 //
 // doneCriteria is a SHELL COMMAND, not prose — "machine-checkable done" means exit code 0, not a
 // model's opinion that it's finished.
@@ -52,6 +55,28 @@ export function writeCheckpoint({ iteration, doneCriteria, next, blockers }, fil
   return cp;
 }
 
+// H3 (GitHub issue: AUTONOMOUS MODE injected into attended sessions + a stale checkpoint resumed as
+// if it were live). ground-ruvnet.sh used to inject `.ruvnet-brain/checkpoint.json`'s raw content on
+// every autonomous-flagged turn with no age check at all — a checkpoint from a loop that ended days
+// or weeks ago would be resumed as though it were the current session's own state. This is the ONE
+// place "how old is too old" is decided; ground-ruvnet.sh (via the `stale` CLI verb below) and
+// scripts/single-source-check.mjs's E1 audit both judge staleness against this exact threshold and
+// this exact field, so the two can never quietly disagree about what "stale" means.
+export const CHECKPOINT_STALE_MS = 24 * 60 * 60 * 1000; // 24h
+
+/**
+ * Age verdict for a checkpoint object, judged by its OWN `updatedAt` claim — never by the file's
+ * mtime, which a copy/rsync/restore can reset without the checkpoint's content actually changing.
+ * `known: false` means there is nothing to judge (no checkpoint, or no parseable `updatedAt`); a
+ * caller must treat "unknown" as neither proven-fresh nor proven-stale.
+ */
+export function checkpointStaleness(cp, now = Date.now()) {
+  const updatedAtMs = cp && typeof cp.updatedAt === 'string' ? Date.parse(cp.updatedAt) : NaN;
+  if (!Number.isFinite(updatedAtMs)) return { known: false, stale: false, ageMs: null, ageDays: null };
+  const ageMs = now - updatedAtMs;
+  return { known: true, stale: ageMs >= CHECKPOINT_STALE_MS, ageMs, ageDays: ageMs / 86_400_000 };
+}
+
 /** Stop-condition verdict. Pure decision from state + one real doneCriteria execution. */
 export function checkCheckpoint(file = FILE, runner = (c) => spawnSync('sh', ['-c', c], { stdio: 'ignore' }).status) {
   const cp = readCheckpoint(file);
@@ -79,8 +104,19 @@ if (invokedDirectly) {
     const r = checkCheckpoint();
     console.log(r.verdict);
     process.exit(r.code);
+  } else if (cmd === 'stale') {
+    // H3: the ONE place a caller (ground-ruvnet.sh, via `node loop-checkpoint.mjs stale`) asks "is
+    // this checkpoint too old to resume from?" without re-deriving the 24h rule itself. Exit codes
+    // are the protocol, same style as `check`: 0 = fresh (safe to inject/resume), 1 = stale (stdout
+    // carries the whole age in days, floored, for a human-readable message), 2 = unknown — no
+    // checkpoint, unparseable JSON, or no usable `updatedAt` to judge by. A caller must not treat 2
+    // as either fresh or stale.
+    const info = checkpointStaleness(readCheckpoint());
+    if (!info.known) process.exit(2);
+    if (info.stale) { console.log(String(Math.floor(info.ageDays))); process.exit(1); }
+    process.exit(0);
   } else {
-    console.error('usage: loop-checkpoint.mjs <read|write|check> [--dir D] [--iteration N --done-criteria CMD --next "…" --blockers "…"]');
+    console.error('usage: loop-checkpoint.mjs <read|write|check|stale> [--dir D] [--iteration N --done-criteria CMD --next "…" --blockers "…"]');
     process.exit(2);
   }
 }

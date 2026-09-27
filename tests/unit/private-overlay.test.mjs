@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { applyPrivateOverlay } from '../../scripts/private-overlay.mjs';
-import { applyPublicBundlePreservingPrivate, capturePrivateOverlayState } from '../../kb/forge-update.mjs';
+import { capturePrivateOverlayState, restorePrivateFilesIntoCandidate } from '../../kb/forge-update.mjs';
 
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../scripts/private-overlay.mjs');
 const STORE = 'fixture-private';
@@ -82,7 +82,9 @@ describe('private-overlay writer', () => {
     const after = readJson(path.join(root, 'SOURCE.json'));
     expect(after.stores[STORE]).toEqual({
       kbName: STORE, updateManaged: false, builtUtc: '2026-07-31T15:15:56.164Z',
-      sourceCommit: null, sourceRepo: 'private', canonicalManifestUrl: null,
+      // S4: sourceDescribe is now always projected alongside sourceCommit (schema v2's ledger
+      // adds both together) — null here since a private sidecar's own generation carries neither.
+      sourceCommit: null, sourceDescribe: null, sourceRepo: 'private', canonicalManifestUrl: null,
     });
     expect(after.canonicalManifestUrl).toBe(MANIFEST_URL);
     const { stores: afterStores, ...afterTop } = after;
@@ -90,6 +92,34 @@ describe('private-overlay writer', () => {
     expect(afterTop).toEqual(beforeTop);
     expect(afterStores['public-store']).toEqual(beforeStores['public-store']);
     expect(Object.keys(afterStores)).toEqual(['public-store', STORE]);
+  });
+
+  // S3 (explicit local ownership): scripts/ingest-repo.mjs distinguishes a repo it pulled in on
+  // demand from a genuinely private pre-built sidecar via this opt-in field.
+  it('stamps an opt-in origin alongside updateManaged:false when passed, and omits it entirely when not', () => {
+    const root = liveShapedRoot(); const from = sidecarDir();
+    applyPrivateOverlay({ root, from, stores: [STORE], origin: 'local-ingest' });
+    const after = readJson(path.join(root, 'SOURCE.json'));
+    expect(after.stores[STORE]).toEqual({
+      kbName: STORE, updateManaged: false, builtUtc: '2026-07-31T15:15:56.164Z',
+      sourceCommit: null, sourceDescribe: null, sourceRepo: 'private', canonicalManifestUrl: null, origin: 'local-ingest',
+    });
+  });
+
+  // scripts/ingest-repo.mjs builds directly into the live root (forge-refresh.mjs --out <kbDir>) —
+  // it has no separate sidecar directory to point `--from` at. Pointing `--from` at the SAME root
+  // must degenerate to registry-stamping only: every required sidecar already compares byte-equal
+  // to itself, so nothing is (or needs to be) copied, and PRIVATE-STORES.json/SOURCE.json still get
+  // written correctly.
+  it('degenerates to registry-stamping only when --from equals --root (the ingest-repo.mjs shape)', () => {
+    const root = liveShapedRoot(); // fence already lists STORE by default
+    const from = sidecarDir();
+    applyPrivateOverlay({ root, from, stores: [STORE] }); // first land the sidecar files IN root
+    const beforeBytes = fs.readFileSync(path.join(root, `${STORE}.big.rvf`));
+    const receipt = applyPrivateOverlay({ root, from: root, stores: [STORE], origin: 'local-ingest' });
+    expect(receipt.stores[0].copied).toEqual([]);
+    expect(fs.readFileSync(path.join(root, `${STORE}.big.rvf`))).toEqual(beforeBytes);
+    expect(readJson(path.join(root, 'SOURCE.json')).stores[STORE].origin).toBe('local-ingest');
   });
 
   it('records the RVF generation with the ledger identity untouched and the bytes copied exactly', () => {
@@ -132,25 +162,26 @@ describe('private-overlay writer', () => {
     ]);
     expect(overlay.cards[STORE]).toMatch(/^## fixture-private\n/);
 
-    const workspace = tmp('private-overlay-bundle-');
-    const backupPath = path.join(workspace, 'backup'); const extractDir = path.join(workspace, 'extract');
-    fs.cpSync(root, backupPath, { recursive: true });
-    fs.mkdirSync(extractDir);
-    writeJson(path.join(extractDir, 'SOURCE.json'), { canonicalManifestUrl: MANIFEST_URL, brainVersion: '0.0.0-fixture-next', releaseTag: 'v0.0.0-fixture-next', stores: { 'public-store': { kbName: 'public-store', sourceCommit: 'c'.repeat(40) } } });
-    writeJson(path.join(extractDir, 'RVF-GENERATIONS.json'), { schemaVersion: 2, brainVersion: '0.0.0-fixture-next', releaseTag: 'v0.0.0-fixture-next', stores: { 'public-store': { file: 'public-store.big.rvf', sha256: sha('public-v2'), bytes: 9 } } });
-    writeJson(path.join(extractDir, 'repo-aliases.json'), { 'public-store': ['pub2'] });
-    fs.writeFileSync(path.join(extractDir, 'capability-cards.md'), '# Capability Cards\n\n## public-store\nNew public card.\n');
-    fs.writeFileSync(path.join(extractDir, 'public-store.big.rvf'), 'public-v2');
-    writeJson(path.join(extractDir, 'PRIVATE-STORES.json'), { privateStores: [STORE] });
+    // candidateDir stands in for the sibling tree runStorageTransaction builds from the freshly
+    // extracted public bundle (S1: ONE APPLY PATH — restorePrivateFilesIntoCandidate is what
+    // forge-update.mjs's prepareCandidate actually calls; the deleted applyPublicBundlePreservingPrivate
+    // was a second, parallel implementation production code never called).
+    const candidateDir = tmp('private-overlay-candidate-');
+    writeJson(path.join(candidateDir, 'SOURCE.json'), { canonicalManifestUrl: MANIFEST_URL, brainVersion: '0.0.0-fixture-next', releaseTag: 'v0.0.0-fixture-next', stores: { 'public-store': { kbName: 'public-store', sourceCommit: 'c'.repeat(40) } } });
+    writeJson(path.join(candidateDir, 'RVF-GENERATIONS.json'), { schemaVersion: 2, brainVersion: '0.0.0-fixture-next', releaseTag: 'v0.0.0-fixture-next', stores: { 'public-store': { file: 'public-store.big.rvf', sha256: sha('public-v2'), bytes: 9 } } });
+    writeJson(path.join(candidateDir, 'repo-aliases.json'), { 'public-store': ['pub2'] });
+    fs.writeFileSync(path.join(candidateDir, 'capability-cards.md'), '# Capability Cards\n\n## public-store\nNew public card.\n');
+    fs.writeFileSync(path.join(candidateDir, 'public-store.big.rvf'), 'public-v2');
+    writeJson(path.join(candidateDir, 'PRIVATE-STORES.json'), { privateStores: [STORE] });
 
-    expect(applyPublicBundlePreservingPrivate({ extractDir, kbDir: root, backupPath, overlay })).toEqual({ restored: 1 });
-    expect(fs.readFileSync(path.join(root, `${STORE}.big.rvf`), 'utf8')).toBe('private-rvf-bytes');
-    expect(fs.readFileSync(path.join(root, 'public-store.big.rvf'), 'utf8')).toBe('public-v2');
-    const source = readJson(path.join(root, 'SOURCE.json'));
+    expect(restorePrivateFilesIntoCandidate({ candidateDir, sourceDir: root, overlay })).toEqual({ restored: 1 });
+    expect(fs.readFileSync(path.join(candidateDir, `${STORE}.big.rvf`), 'utf8')).toBe('private-rvf-bytes');
+    expect(fs.readFileSync(path.join(candidateDir, 'public-store.big.rvf'), 'utf8')).toBe('public-v2');
+    const source = readJson(path.join(candidateDir, 'SOURCE.json'));
     expect(source.brainVersion).toBe('0.0.0-fixture-next');
     expect(source.stores[STORE].updateManaged).toBe(false);
-    expect(readJson(path.join(root, 'RVF-GENERATIONS.json')).stores[STORE].sha256).toBe(sha('private-rvf-bytes'));
-    expect(fs.readFileSync(path.join(root, 'capability-cards.md'), 'utf8')).toMatch(/^## fixture-private\n/m);
+    expect(readJson(path.join(candidateDir, 'RVF-GENERATIONS.json')).stores[STORE].sha256).toBe(sha('private-rvf-bytes'));
+    expect(fs.readFileSync(path.join(candidateDir, 'capability-cards.md'), 'utf8')).toMatch(/^## fixture-private\n/m);
   });
 
   it('is idempotent: a second run changes nothing and adds no snapshot', () => {

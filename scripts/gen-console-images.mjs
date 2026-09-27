@@ -24,7 +24,6 @@ const STYLE = ' — Style: deep near-black background (#0a0c10), sophisticated p
 
 const IMAGES = [
   { slug: 'hero', size: '1536x1024', p: 'A warm amber intelligence gently understanding a computer: soft glowing amber and gold neural filaments and threads of light weaving and resolving out of a faint tangle on the left into an elegant, orderly, translucent crystalline lattice of floating glass panels and cards on the right — the feeling of messy machine settings being calmly brought into clear, beautiful order. Lots of soft dark negative space on the right for text.' },
-  { slug: 'memory', size: '1024x1024', p: 'A single luminous softly-glowing sphere of warm amber and cyan light, made of countless fine interwoven filaments, holding its shape calmly in dark space — an abstract emblem of a mind that remembers; serene, alive, precise.' },
 ];
 
 async function gen(model, prompt, size) {
