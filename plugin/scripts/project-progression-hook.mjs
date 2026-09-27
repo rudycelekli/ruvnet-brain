@@ -96,12 +96,24 @@ function toolAction(payload) {
   const responseRecord = response && typeof response === 'object' && !Array.isArray(response)
     ? response
     : null;
-  const exitCode = responseRecord && [responseRecord.exit_code, responseRecord.exitCode, responseRecord.status]
+  const explicitCode = responseRecord && [responseRecord.exit_code, responseRecord.exitCode, responseRecord.status]
     .find((value) => Number.isSafeInteger(value));
-  const interrupted = responseRecord?.interrupted === true;
-  const failed = interrupted || (Number.isSafeInteger(exitCode) && exitCode !== 0);
+  const responseText = typeof response === 'string' ? response : '';
+  // Native host terminal envelopes may serialize an exact `Exit code: N` line. Do not
+  // scan arbitrary prose: tool output often quotes logs or examples containing `status: 0`.
+  const textualCode = responseText.match(/^\s*Exit code:\s*(-?\d+)\s*$/i);
+  const exitCode = Number.isSafeInteger(explicitCode)
+    ? explicitCode
+    : textualCode ? Number(textualCode[1]) : undefined;
+  const interrupted = responseRecord?.interrupted === true || responseRecord?.signal === 'SIGINT';
+  const explicitError = responseRecord?.isError === true || payload.is_error === true;
+  const declaredOutcome = ['success', 'failure', 'interrupted', 'unknown'].includes(responseRecord?.outcome)
+    ? responseRecord.outcome : null;
+  const failed = explicitError || (Number.isSafeInteger(exitCode) && exitCode !== 0);
+  const terminal = failed || Number.isSafeInteger(exitCode)
+    || responseRecord?.success === true || responseRecord?.ok === true;
   const outcome = payload.hook_event_name === 'PostToolUse'
-    ? (failed ? 'failure' : response === undefined ? 'unknown' : 'success')
+    ? (interrupted ? 'interrupted' : failed ? 'failure' : declaredOutcome || (terminal ? 'success' : 'unknown'))
     : 'pending';
   const observation = {
     trigger: payload.hook_event_name,
@@ -111,6 +123,7 @@ function toolAction(payload) {
     outcome,
     ...(Number.isSafeInteger(exitCode) ? { exitCode } : {}),
     ...(interrupted ? { interrupted: true } : {}),
+    ...(explicitError ? { isError: true } : {}),
   };
   if (responseRecord) {
     const stdout = boundedText(responseRecord.stdout);
@@ -133,7 +146,7 @@ function enrichStateWithObservation(state, payload) {
   return {
     ...state,
     commands: [...commands, observation],
-    ...(observation.outcome === 'failure' ? { failures: [...failures, observation] } : {}),
+    ...(observation.outcome === 'failure' || observation.outcome === 'interrupted' ? { failures: [...failures, observation] } : {}),
   };
 }
 

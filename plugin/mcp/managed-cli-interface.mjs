@@ -5,6 +5,8 @@ import path from 'node:path';
 import { loadRuntimePreferences, runtimeChildEnv } from '../scripts/runtime-preferences.mjs';
 import { projectDirectory } from '../scripts/project-identity.mjs';
 import { recordManagedCliObservation, recordRegistryLatestObservation } from '../scripts/capability-claim-evidence.mjs';
+import { runSessionSnapshotHook } from '../scripts/session-snapshot-hook.mjs';
+import { resolveProjectStore } from '../scripts/project-store-resolver.mjs';
 
 export const MANAGED_EXECUTABLES = Object.freeze([
   'ruflo',
@@ -233,20 +235,69 @@ function execute(executable, argv, env) {
       clearTimeout(timer);
       resolve({ code: null, stdout: '', stderr: '', error: error.message });
     });
-    child.once('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString(), error: null });
+      child.once('close', (code, signal) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, signal, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString(), error: null });
     });
   });
 }
 
+/**
+ * Convert the child-process result into the managed boundary's terminal vocabulary. A zero exit
+ * status is necessary but not sufficient: a tool that emits a fatal marker or cannot provide a
+ * terminal status must remain failure/unknown evidence for progression consumers.
+ */
+export function normalizeManagedExecution(execution) {
+  const output = [execution?.stdout, execution?.stderr].filter(Boolean)
+    .join(execution?.stdout && execution?.stderr ? '\n' : '');
+  const contradictoryFailure = /(?:^|\n)\s*(?:❌|\[ERROR\])|invalid pragma command|key not found/i.test(output);
+  if (execution?.signal) return { outcome: 'interrupted', output, signal: execution.signal, contradictoryFailure };
+  if (execution?.error || contradictoryFailure || execution?.code === null || execution?.code === undefined) {
+    return { outcome: execution?.error || contradictoryFailure ? 'failure' : 'unknown', output, contradictoryFailure };
+  }
+  return { outcome: execution.code === 0 ? 'success' : 'failure', output, contradictoryFailure };
+}
+
+function managedSessionId(env) {
+  const supplied = env.RUVNET_BRAIN_SESSION_ID || env.RUVNET_HOOK_SESSION_ID;
+  return typeof supplied === 'string' && supplied.trim() ? supplied.trim() : `managed-cli-${process.pid}`;
+}
+
+/** Bind managed CLI execution to the existing progression writer when this project has adopted it. */
+function managedProgressionCapture({ executable, argv, projectRoot, env, event, execution, normalized }) {
+  const adopted = fs.existsSync(path.join(projectRoot, '.swarm'));
+  if (!adopted) return { adopted: false, skipped: 'project has not adopted the canonical store' };
+  const host = String(env.RUVNET_HOOK_HOST || '').toLowerCase();
+  if (!['claude', 'codex'].includes(host)) return { adopted: true, error: 'managed host identity unavailable' };
+  let resolution;
+  try { resolution = resolveProjectStore({ projectDir: projectRoot }); }
+  catch (error) { return { adopted: true, error: `project store could not be resolved: ${error?.message || error}` }; }
+  const payload = {
+    session_id: managedSessionId(env),
+    hook_event_name: event,
+    tool_name: executable,
+    tool_input: { command: [executable, ...argv].join(' ') },
+    ...(execution ? {
+      tool_response: {
+        stdout: execution.stdout,
+        stderr: execution.stderr,
+        exit_code: execution.code,
+        ...(execution.signal ? { signal: execution.signal, interrupted: true } : {}),
+        outcome: normalized?.outcome,
+        ...(execution.error ? { error: execution.error } : {}),
+      },
+    } : {}),
+  };
+  return { adopted: true, ...runSessionSnapshotHook(projectRoot, event, { rawInput: JSON.stringify(payload), host }) };
+}
+
 function resultOf(executable, argv, result) {
   const output = [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? '\n' : '');
-  const contradictoryFailure = /(?:^|\n)\s*(?:❌|\[ERROR\])|invalid pragma command|key not found/i.test(output);
-  if (result.error || result.code !== 0 || contradictoryFailure) {
-    const reason = result.error || (contradictoryFailure ? 'fatal output despite exit 0' : `exit ${result.code}`);
+  const normalized = normalizeManagedExecution(result);
+  if (normalized.outcome !== 'success') {
+    const reason = result.error || (normalized.contradictoryFailure ? 'fatal output despite exit 0' : result.code == null ? 'no terminal exit status' : `exit ${result.code}`);
     return {
       content: [{ type: 'text', text: output || `${executable} ${argv.join(' ')} failed: ${reason}` }],
       isError: true,
@@ -258,7 +309,7 @@ function resultOf(executable, argv, result) {
   };
 }
 
-export async function callManagedCli(toolName, args, env = process.env, fetchImpl = globalThis.fetch) {
+export async function callManagedCli(toolName, args, env = process.env, fetchImpl = globalThis.fetch, lifecycle = {}) {
   try {
     const executable = assertExecutable(args?.executable);
     const argv = literalArgv(args?.argv ?? []);
@@ -327,11 +378,34 @@ export async function callManagedCli(toolName, args, env = process.env, fetchImp
           isError: true,
         };
       }
+      // Host identity is process context established by the native adapter, never a tool argument.
+      // A caller can request a CLI command, but must not relabel its continuity record as another
+      // host by supplying an arbitrary `host` property.
       const childEnv = (executable === 'agentic-flow' || executable === 'agentic-qe')
         ? runtimeChildEnv({ env, cwd: projectRoot })
         : env;
+      const capture = typeof lifecycle.capture === 'function' ? lifecycle.capture : managedProgressionCapture;
+      const beforeCapture = await capture({ executable, argv, projectRoot, env: childEnv, event: 'PreToolUse' });
+      if (beforeCapture?.error || (beforeCapture?.adopted && beforeCapture.progressionCaptured !== true)) {
+        const reason = beforeCapture.error || beforeCapture.skipped || 'pre-execution progression was not durably captured';
+        return { content: [{ type: 'text', text: `managed execution refused: ${reason}` }], isError: true };
+      }
+      if (lifecycle && typeof lifecycle.beforeExecute === 'function') {
+        await lifecycle.beforeExecute({ executable, argv, projectRoot, env: childEnv });
+      }
       const execution = await execute(executable, argv, childEnv);
+      const normalized = normalizeManagedExecution(execution);
+      const afterCapture = await capture({ executable, argv, projectRoot, env: childEnv, event: 'PostToolUse', execution, normalized });
+      if (lifecycle && typeof lifecycle.afterExecute === 'function') {
+        await lifecycle.afterExecute({ executable, argv, projectRoot, env: childEnv, execution, normalized });
+      }
       recordManagedCliObservation({ toolName, executable, argv, execution, env });
+      if (afterCapture?.adopted && afterCapture.progressionCaptured !== true) {
+        return {
+          content: [{ type: 'text', text: `managed command ${normalized.outcome}; continuity result was not durably captured: ${afterCapture.skipped || 'unknown reason'}` }],
+          isError: true,
+        };
+      }
       return resultOf(executable, argv, execution);
     }
 

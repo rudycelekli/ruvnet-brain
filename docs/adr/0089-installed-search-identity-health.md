@@ -14,8 +14,8 @@ relates: [ADR-058, ADR-086]
 
 # Installed search identity health
 
-Status: Accepted; implemented in the candidate, public-install qualification pending.
-Date: 2026-09-19. Updated: 2026-09-20.
+**Status**: Accepted (implemented in the candidate, public-install qualification pending)
+**Date**: 2026-09-19 (updated 2026-09-20)
 
 The live installation had package and validator identity for one release while SOURCE.json and
 search-engine files belonged to an older release. RUNTIME-IDENTITY.json intentionally pins the

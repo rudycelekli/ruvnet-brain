@@ -86,7 +86,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readStdinBounded } from './hook-input.mjs';
+import { readStdinBounded, isHarnessGenerated } from './hook-input.mjs';
 import { resolveBash } from './hook-shim-bash.mjs';
 
 // WHERE THIS FILE'S SIBLINGS LIVE. Resolved from THIS file's own location so it is correct under the
@@ -112,9 +112,16 @@ const SCRIPTS_DIR = path.dirname(SELF);                     // the payload's scr
 // The CC event name the shim forwarded. No event → nothing to run; stay silent.
 const EVENT = process.argv[2] || '';
 
-// Bound the whole runtime well under the 5s hook budget: producers run sequentially and each has its
-// own internal watchdog, but a backstop timeout here means a wedged producer can never hang the turn.
-const PRODUCER_TIMEOUT_MS = Number(process.env.RUVNET_UNPROMPTED_TIMEOUT_MS) || 4000;
+// Bound the whole runtime well under this hook's DECLARED timeout (hooks.json / codex-hooks.json:
+// 'unprompted-speech' is 3s, not the 5s this comment used to assume) — producers run sequentially and
+// each has its own internal watchdog, but a backstop timeout here means a wedged producer can never
+// hang the turn. Found live 2026-09-27: the old 4000ms default left NO real margin under a 3000ms
+// declared timeout once Node startup + per-producer spawnSync overhead is counted, and slower
+// per-process-spawn hosts (Windows CI) pushed measured wall-clock to 83% of budget — selfcheck.mjs's
+// own 80%-margin rule exists exactly to catch a hook running this close to its declared contract.
+// 2000ms leaves real headroom (Node/import startup + the 80% margin check at 2400ms) on every host,
+// not just a Windows-specific patch.
+const PRODUCER_TIMEOUT_MS = Number(process.env.RUVNET_UNPROMPTED_TIMEOUT_MS) || 2000;
 const MAX_BUFFER = 1 << 20;
 
 const VALID_CHANNELS = new Set(['advocacy', 'promotion', 'lesson', 'alarm']);
@@ -222,6 +229,17 @@ try {
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) event = parsed;
 } catch { /* not JSON → no occasion → silence, below */ }
 if (!event) silent();
+
+// H2: a background task notification, slash-command scaffold, or other harness-authored message
+// arrives on UserPromptSubmit exactly like real user text (wrapped in tags such as
+// <task-notification>, <local-command-caveat>, <system-reminder>, ...). None of that is something a
+// user typed, so no producer here should react to it — an advocacy nudge, a lesson prompt, or a
+// promotion offer fired at the harness's own bookkeeping is noise on every background-task turn.
+// PreToolUse payloads carry no `prompt`/`user_prompt`/`input` field, so this is a no-op for them.
+{
+  const promptText = event.prompt ?? event.user_prompt ?? event.input;
+  if (typeof promptText === 'string' && isHarnessGenerated(promptText)) silent();
+}
 
 const producers = resolveProducers(EVENT);
 if (!producers.length) silent();   // unknown event, or nothing wired for it — never speak on a guess
@@ -396,10 +414,13 @@ for (const c of candidates) {
       let offer = true;
       try { offer = led.shouldStillOffer(findingId, { severity, stateHash }); } catch { offer = false; }
       if (!offer) break;                                     // dismissed / budget spent → drop
-      // Deliver, and record the OFFERED denominator centrally (best-effort; recording never breaks
-      // the hook it measures). Moving OFFERED here is what makes precision computable at the one place
-      // that actually decides to show a card.
-      try { led.record({ id: findingId, action: led.ACTIONS.OFFERED, severity, stateHash }); } catch { /* a lost row costs one denominator, never the turn */ }
+      // Persist the OFFERED denominator before delivery. A recommendation whose delivery receipt was
+      // not durably written cannot participate in the later applied/dismissed lifecycle; emitting it
+      // anyway would create a card the next prompt cannot resolve and would make precision lie.
+      let receipt;
+      try { receipt = led.record({ id: findingId, action: led.ACTIONS.OFFERED, severity, stateHash }); }
+      catch { receipt = null; }
+      if (!receipt?.ok) break;
       advisories.push({ copy, hookEventName });
       break;
     }

@@ -10,7 +10,12 @@ on:
   workflow_run:
     # EVERY scheduled/CI workflow belongs here — gists-nightly failed 3 nights in a row (07-10..12)
     # in silence because it was missing from this list. Silent redness is the one banned failure mode.
-    workflows: ["ci", "integration-linux", "gists-nightly", "protected-release"]
+    # 2026-09-26: "ci" removed — ci.yml runs only as a reusable workflow inside
+    # release-candidate-preflight, so a workflow_run on "ci" never fires. The four scheduled jobs
+    # below were unwatched (corpus-nightly-dispatch among them while protected-release failed 16 days).
+    # canonical-qa is deliberately absent: it runs on every PR and would page on routine PR redness.
+    workflows: ["release-candidate-preflight", "integration-linux", "gists-nightly", "protected-release",
+                "corpus-nightly-dispatch", "published-surface-probe", "learning-replay", "model-catalog-refresh"]
     types: [completed]
 # The notify job needs nothing from the repo — strip the token to read-nothing so an injected
 # payload (were one ever to slip through again) has no credential to steal.

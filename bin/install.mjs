@@ -561,7 +561,7 @@ export function ensureUpdaterPrerequisites(kbDir) {
   return { updater: true, validator: placeTrustedCoverageValidator(kbDir) };
 }
 
-export async function unzipInto(zipPath, cacheDir, sourceDir = null, { releaseTag = null } = {}) {
+export async function unzipInto(zipPath, cacheDir, sourceDir = null, { releaseTag = null, activate = true } = {}) {
   step(
     'Unpacking the brain into place',
     'so the plugin finds forge-mcp-all.mjs and the vector stores right where it looks',
@@ -668,6 +668,13 @@ export async function unzipInto(zipPath, cacheDir, sourceDir = null, { releaseTa
       'The live brain was not touched. Fetch a complete current release and retry.');
   }
 
+  // Recovery (stageBundleForRecovery / kb/forge-update.mjs's applyVerifiedStagedRelease) consumes
+  // this authenticated, validated stage through runStorageTransaction instead — the SAME apply
+  // primitive main()'s normal --apply uses, which preserves a private overlay properly. Keep fresh
+  // activation below as the only owner of installer replacement and the private-overlay refusal:
+  // a caller that wants staged-only output must never fall through to it.
+  if (!activate) return { status: 'STAGED', stageDir, extractedBy, coverage: stagedCoverage };
+
   // Activation is an exact directory generation swap. A malformed candidate never reaches this
   // point, retired public files cannot survive as overlay debris, and a failed rename restores the
   // prior generation. Existing private overlays are update-owned and must never be stripped by the
@@ -748,6 +755,20 @@ export async function unzipInto(zipPath, cacheDir, sourceDir = null, { releaseTa
   return { status: 'ACTIVATED', priorGeneration: hadPrior
     ? { status: 'PRESERVED_UNCLASSIFIED', path: preservedDir, automaticCleanupEligible: false }
     : null };
+}
+
+/** Stage and validate a bundle for forge-update's private-overlay recovery rail
+ * (kb/forge-update.mjs's applyVerifiedStagedRelease) without touching the live generation. */
+export async function stageBundleForRecovery(zipPath, cacheDir, sourceDir = null, { releaseTag = null, signaturePath = `${zipPath}.sig` } = {}) {
+  const verified = verifyBundle(zipPath, signaturePath);
+  if (!verified.ok) throw new Error(`recovery bundle signature verification failed: ${verified.reason}`);
+  const bundleSha256 = crypto.createHash('sha256').update(fs.readFileSync(zipPath)).digest('hex');
+  const result = await unzipInto(zipPath, cacheDir, sourceDir, { releaseTag, activate: false });
+  fs.writeFileSync(`${result.stageDir}.staged-release.json`, JSON.stringify({
+    schemaVersion: 1, kind: 'ruvnet-brain-authenticated-stage', bundleSha256,
+    releaseTag, stagedAt: new Date().toISOString(),
+  }) + '\n', { mode: 0o600 });
+  return { ...result, bundleSha256 };
 }
 
 /**
@@ -986,7 +1007,12 @@ export function serverDependencies(source, seen = new Set()) {
     seen.add(file);
     let src = '';
     try { src = fs.readFileSync(file, 'utf8'); } catch { return; }
-    for (const m of src.matchAll(/^\s*(?:import|export)[^'"\n]*from\s*['"](\.[^'"]+)['"]/gm)) {
+    // Lazy [^'"]* (no \n exclusion) so a multi-line named import — `import {\n  a,\n} from './x.mjs';`
+    // — is still seen: the exclusion used to stop at the first newline, so this walker silently
+    // missed any dependency imported that way. Caught live 2026-09-27: session-snapshot-hook.mjs's
+    // multi-line import of project-progression-hook.mjs never reached the Codex MCP server package,
+    // reproducing the exact packaging-boundary failure this function's own header warns about.
+    for (const m of src.matchAll(/^\s*(?:import|export)[^'"]*?from\s*['"](\.[^'"]+)['"]/gm)) {
       const spec = specPrefix ? path.join(specPrefix, m[1]) : m[1];
       const from = path.resolve(path.dirname(file), m[1]);
       if (out.some((d) => d.from === from)) continue;
@@ -3180,6 +3206,11 @@ export function classifyUpdaterExit(status, { fallbackAllowed = true, result = n
   if (status === 0) {
     if (result?.terminalVerdict === 'applied') return { verdict: 'applied', fallback: false, exitCode: 0 };
     if (result?.terminalVerdict === 'noop') return { verdict: 'noop', fallback: false, exitCode: 0 };
+    // S2 (ONE CURRENCY VERDICT): rollback protection — the offered candidate's corpus generation
+    // predates the installed one. A clean, intentional no-op, not a failure: the live tree is exactly
+    // as it was, on purpose, and reporting it as 'invalid-result'/failed would turn the updater's own
+    // correct refusal into a reported --update failure (the exact issue #106 shape, one gate later).
+    if (result?.terminalVerdict === 'refused') return { verdict: 'refused', fallback: false, exitCode: 0 };
     if (!requireResult) return { verdict: 'legacy-success', fallback: false, exitCode: 0 };
     return { verdict: 'invalid-result', fallback: false, exitCode: 1 };
   }
@@ -3422,7 +3453,7 @@ export function classifyHostConvergence(receipt, expectedVersion = PACKAGE_VERSI
   return { healthy: true, state: 'channels-converged' };
 }
 
-function runUpdate() {
+async function runUpdate() {
   printBanner('update');
   const kbDir = resolvedKbDir();
   const brainHome = process.env.RUVNET_BRAIN_HOME || path.dirname(kbDir);
@@ -3564,10 +3595,46 @@ function runUpdate() {
     warn("the knowledge bundle could not refresh; continuing with executable host synchronization only");
     updateStatus = 0;
   } else if (outcome.fallback) {
-    warn("\nthe bundle's own updater couldn't complete — falling back to a fresh install of the latest Release (this always works)…\n");
-    const self = fileURLToPath(import.meta.url);
-    const fr = spawnSync(process.execPath, [self, '--force'], { stdio: 'inherit',
-      env: { ...refreshEnv, RUVNET_BRAIN_NO_UPDATE_FALLBACK: '1' } });
+    // A blind fresh --force reinstall REFUSES to activate on top of a private overlay (unzipInto's
+    // own "fresh-install activation refused" guard, above) — so for a private-overlay install this
+    // branch used to die() in a loop every time the bundle's own updater failed: same refusal, same
+    // non-zero exit, forever, with no path that ever actually recovers the KB. The authenticated
+    // staged recovery rail (kb/forge-update.mjs's applyVerifiedStagedRelease) exists for exactly
+    // this case: it stages and independently re-verifies the signed bundle, then activates through
+    // runStorageTransaction — the SAME apply primitive main()'s normal --apply uses — which DOES
+    // preserve the private overlay, instead of a second, less careful mechanism that cannot.
+    let hasPrivateOverlay = false;
+    try {
+      const installedSource = JSON.parse(fs.readFileSync(path.join(kbDir, 'SOURCE.json'), 'utf8'));
+      const installedStores = Array.isArray(installedSource.stores) ? installedSource.stores : Object.values(installedSource.stores || {});
+      hasPrivateOverlay = installedStores.some((store) => store?.updateManaged === false);
+    } catch { /* updater already supplied the authoritative failure */ }
+    let fr;
+    if (hasPrivateOverlay) {
+      warn("\nthe installed updater failed; using authenticated staged recovery to preserve private stores…\n");
+      const release = await resolveRelease();
+      const bundle = await obtainBundle(release);
+      if (!bundle.zipPath) throw new Error('private-overlay recovery requires a downloadable signed bundle');
+      const sigPath = `${bundle.zipPath}.sig`;
+      const stagedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ruvnet-recovery-stage-'));
+      const staged = await stageBundleForRecovery(bundle.zipPath, stagedRoot, null, { signaturePath: sigPath,
+        releaseTag: release?.source === 'latest' ? (release.tag || null) : null });
+      const descriptor = path.join(stagedRoot, 'recovery-input.json');
+      let expectedRuntimeVersion = PACKAGE_VERSION;
+      try { expectedRuntimeVersion = JSON.parse(fs.readFileSync(path.join(kbDir, 'RUNTIME-IDENTITY.json'), 'utf8')).brainVersion || expectedRuntimeVersion; } catch { /* validator reports missing identity */ }
+      fs.writeFileSync(descriptor, JSON.stringify({ stagedDir: staged.stageDir, liveDir: kbDir,
+        bundlePath: bundle.zipPath, signaturePath: sigPath, bundleSha256: staged.bundleSha256,
+        expectedRuntimeVersion, releaseTag: release?.source === 'latest' ? (release.tag || null) : null,
+      }) + '\n', { mode: 0o600 });
+      fr = spawnSync(process.execPath, [path.join(REPO_ROOT, 'kb', 'forge-update.mjs'), '--staged-release', descriptor], {
+        stdio: 'inherit', cwd: path.dirname(kbDir), env: { ...refreshEnv, RUVNET_BRAIN_NO_UPDATE_FALLBACK: '1' },
+      });
+    } else {
+      warn("\nthe bundle's own updater couldn't complete — falling back to a fresh install of the latest Release (this always works)…\n");
+      const self = fileURLToPath(import.meta.url);
+      fr = spawnSync(process.execPath, [self, '--force'], { stdio: 'inherit',
+        env: { ...refreshEnv, RUVNET_BRAIN_NO_UPDATE_FALLBACK: '1' } });
+    }
     updateStatus = fr.error ? 1 : (fr.status === null ? 1 : fr.status);
   } else {
     updateStatus = outcome.exitCode;

@@ -55,7 +55,12 @@ function schedulerEnvironment(env) {
     throw new Error('RUVNET_CONSOLE_ROOT must be an absolute path');
   }
   const isolatedHome = path.resolve(fixtureRoot);
-  if (isolatedHome === path.resolve(os.homedir())) {
+  // The real system home, NOT os.homedir() — os.homedir() reads process.env.HOME, which a caller
+  // isolating a fixture has typically ALREADY set to this same isolatedHome (consoleFixtureEnvironment
+  // does exactly this), so comparing against it made this guard trip on every correctly-isolated
+  // fixture instead of only on an accidental real-home leak. os.userInfo().homedir is the OS user
+  // database entry and ignores the HOME env var override, so it still names the real home here.
+  if (isolatedHome === path.resolve(os.userInfo().homedir)) {
     throw new Error('RUVNET_CONSOLE_ROOT must not be the real user home in test mode');
   }
   return { ...env, HOME: isolatedHome, USERPROFILE: isolatedHome };

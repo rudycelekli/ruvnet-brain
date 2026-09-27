@@ -35,8 +35,14 @@
  *     result). ground-before-write.sh already trusts this exact directory's file mtimes for its own
  *     24h freshness check; this file trusts the SAME directory the SAME way, just against a
  *     narrower window (since the marker's own mtime, not "20 hours ago", is the turn boundary).
- *     No second "was it searched" signal is invented — a search_ruvnet call this turn mints a stamp
- *     here exactly as it always has, for exactly the same reason (decision-gate's write gate).
+ *     UPDATE (H1 / GitHub #316): per-product term files alone under-reported "was it searched" —
+ *     grounding-stamp.sh used to recognise only a 9-term write-gate vocabulary that omitted `ruvnet`
+ *     itself (and every other Gate-1 term), so a search literally about "ruvnet" minted nothing and
+ *     this gate wrongly fired. grounding-stamp.sh now also writes a vocabulary-independent
+ *     `.any-search` marker into this SAME directory on every successful search regardless of query
+ *     content, so newestGroundingStampMs below (which already scans every file, by name-agnostic
+ *     design) sees it with no code change needed here — a search_ruvnet call this turn always mints
+ *     evidence here now, not only when its query happens to name a recognised product.
  *   - The Stop block/continue contract: `{"hookSpecificOutput":{"hookEventName":"Stop",
  *     "additionalContext":"..."}}` on stdout, exit 0. This is not a new discovery — it is the exact
  *     contract continuation-gate.mjs already uses and this repo's own tests already prove works on
