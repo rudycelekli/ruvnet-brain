@@ -3,8 +3,9 @@ id: ADR-075
 title: Knowledge-to-execution enforcement is a mandatory policy boundary
 status: Accepted
 date: 2026-08-30
-updated: 2026-09-19
-reviewed_digest: c3ed97fa9160
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 61f7868f367e
 version: 1.1.3
 impl: built
 authors: [Stuart Kerr, Codex]
@@ -178,6 +179,7 @@ complete reconciliation and dual-seat receipt enforcement, exhaustive architectu
 and public release proof remain outstanding.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: ground-ruvnet.sh checkpoint-staleness inlining, decision-gate dead-route removal, and this session's install.mjs fixes. Knowledge-to-execution enforcement itself is unchanged. | Reviewed `plugin/skills/ruvnet-brain/SKILL.md`, `plugin/skills/ruvnet-brain/PLAYBOOK.md`, `plugin/hooks/hooks.json`, `plugin/hooks/codex-hooks.json`, `plugin/scripts/ground-ruvnet.sh`, `plugin/scripts/ground-before-write.sh` against the commits listed above; reviewed_digest 61f7868f367e. |
 
 | 2026-09-19 | Reviewed current source and normative claims; the detailed September 19 findings below retain their stated runtime limitations. reviewed_digest c3ed97fa9160. | `plugin/skills/ruvnet-brain/SKILL.md`, `plugin/skills/ruvnet-brain/PLAYBOOK.md`, `plugin/hooks/hooks.json`; source consistency review only, no new deployment or acceptance claim. |
 

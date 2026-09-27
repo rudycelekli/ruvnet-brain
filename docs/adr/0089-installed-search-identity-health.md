@@ -2,8 +2,10 @@
 id: ADR-089
 title: Doctor verifies the installed search engine separately from the validator
 status: Accepted
+reviewed_digest: 521b3360b4a5
 date: 2026-09-19
-updated: 2026-09-20
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.0.4
 governs:
   - scripts/installed-brain-health.mjs
@@ -44,6 +46,7 @@ versions and corpus tags, plus explicit weak-evidence counterexamples. Installed
 public-artifact verification remain release gates; these tests do not prove answer correctness.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: this session's own install.mjs fixes (macOS doctor-smoke deadline, serverDependencies parsing, corpus-currency verdict consolidation) -- exactly the installed-search-identity-health machinery this ADR governs, being repaired, not redesigned. | Reviewed `scripts/installed-brain-health.mjs`, `bin/install.mjs`, `tests/unit/installed-brain-health.test.mjs` against the commits listed above; reviewed_digest 521b3360b4a5. |
 
 | Date | Change | Evidence |
 |---|---|---|

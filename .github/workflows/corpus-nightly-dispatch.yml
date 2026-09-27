@@ -145,8 +145,34 @@ jobs:
             echo "- event: \`$run_event\`"
             echo "- candidate: \`$CANDIDATE_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Report asynchronous outcome monitoring
+      - name: Wait for the dispatched corpus run and fail this job if it did not succeed
+        # WHY THIS STEP EXISTS, NOT JUST A SUMMARY LINE (found 2026-09-27, live incident review).
+        #
+        # The old version of this step never waited: it wrote "failure... reported by ntfy-alerts"
+        # to the step summary and exited 0 immediately after confirming dispatch. That sentence was
+        # false in a way nobody could see without checking: ntfy-alerts.yml listens for
+        # `workflow_run` on protected-release's completion, but protected-release was dispatched
+        # here using `${{ github.token }}` -- and per GitHub's own documented behavior, a
+        # GITHUB_TOKEN-triggered workflow_dispatch runs the workflow but its completion does NOT
+        # fire other workflows' `workflow_run` triggers (workflow_dispatch/repository_dispatch are
+        # the only two exceptions to that restriction, and workflow_run is not one of them). Every
+        # corpus-mode protected-release failure since this repo existed was therefore structurally
+        # invisible to alerting -- confirmed by checking every corpus failure timestamp from
+        # 2026-09-21 through 2026-09-27 against ntfy-alerts.yml's actual run history: zero alert
+        # runs were ever created near any of them, including the two failures that happened AFTER
+        # protected-release was added to ntfy-alerts.yml's watch list on 2026-09-26.
+        #
+        # This dispatcher, unlike its child, runs on a genuine `schedule:` trigger -- its OWN
+        # completion is a real platform event, and `corpus-nightly-dispatch` is already (correctly)
+        # in ntfy-alerts.yml's watch list. So the fix needs no new secret, no PAT, no GitHub App:
+        # actually wait for the child here, using the `actions: write` this job already holds to
+        # poll it, and let a non-success child conclusion become THIS job's own failure. A red
+        # dispatcher then reaches the phone through the listener that already works. This job stays
+        # secret-free on purpose (see the file header: "it cannot sign anything and it cannot
+        # publish anything") -- no direct ntfy call here; exit 1 is the entire mechanism.
         if: steps.armed.outputs.armed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -156,6 +182,24 @@ jobs:
             echo '### protected corpus outcome monitoring'
             echo ''
             echo "- target run: [$run_id]($run_url)"
-            echo '- completion: recorded by the protected child's always-running corpus-terminal-outcome job'
-            echo '- failure, cancellation, or timeout: preserved by the child's terminal artifact and reported by ntfy-alerts'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Poll to a real terminal state. 340 minutes leaves margin under this job's own 360-minute
+          # timeout; 60s matches the poll interval already proven fine elsewhere in this repo for
+          # runs of this length.
+          deadline=$(( $(date +%s) + 340 * 60 ))
+          status=""
+          conclusion=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            read -r status conclusion <<<"$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status,conclusion --jq '"\(.status) \(.conclusion)"')"
+            [ "$status" = completed ] && break
+            sleep 60
+          done
+          if [ "$status" != completed ]; then
+            echo "::error::dispatched corpus run $run_id did not reach a terminal state within 340 minutes ($run_url)"
+            exit 1
+          fi
+          echo "- conclusion: \`$conclusion\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$conclusion" != success ]; then
+            echo "::error::dispatched corpus run $run_id concluded $conclusion, not success ($run_url)"
+            exit 1
+          fi

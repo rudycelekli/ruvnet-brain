@@ -3,8 +3,9 @@ id: ADR-051
 title: Codex host wiring — register MCP and adapt the full lifecycle without version-pinned commands
 status: Accepted
 date: 2026-07-24
-updated: 2026-09-20
-reviewed_digest: 55563231cc8b
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: b4b0d7de765c
 version: 1.1.6
 authors: [Stuart Kerr, Claude Code]
 tags: [codex, mcp, install, doctor, honesty, portability]
@@ -294,6 +295,7 @@ result. `route-dispatch` remains advisory; the wrapper must not represent it as 
 These source observations do not establish native Windows or public installed-host proof.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: install.mjs release fixes, a CONTRIBUTING.md doc consolidation, and routine version bumps (4.3.29-4.3.32) touching plugin.json. No change to how Codex is wired as a host. | Reviewed `bin/install.mjs`, `.codex/config.toml`, `.codex/hooks.json`, `plugin/skills/brain-build/SKILL.md`, `plugin/skills/brain-console/SKILL.md`, `plugin/skills/brain-prompt/SKILL.md` against the commits listed above; reviewed_digest b4b0d7de765c. |
 
 | 2026-09-19 | Reviewed current source and normative claims; the detailed September 19 findings below retain their stated runtime limitations. reviewed_digest 55563231cc8b. | `bin/install.mjs`, `.codex/config.toml`, `.codex/hooks.json`; source consistency review only, no new deployment or acceptance claim. |
 
