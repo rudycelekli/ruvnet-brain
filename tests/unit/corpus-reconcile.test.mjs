@@ -391,6 +391,127 @@ describe('candidate preparation', () => {
       coverageFile: path.join(root, 'data', 'source-coverage.json'),
     })).toThrow(/already-measured coverage object/i);
   });
+
+  // ADR-086 amendment (2026-09-15, commit a20727b7): C3's low score no longer blocks a corpus build.
+  // scripts/corpus-candidate.mjs, scripts/release.mjs, and corpus-seed.yml all switched to
+  // readDiagnosticAccuracyReport, which checks the report's integrity/archive binding, never its
+  // score -- prepareCorpusCandidate was the one caller still missed, so it kept throwing on any
+  // nonzero C3 exit and every full corpus build died there. These tests pin the fixed behavior: a
+  // crashed measurement (no valid, archive-bound report) stays fatal; a low score does not.
+  describe('C3 retrieval-accuracy is advisory, not blocking (ADR-086 amendment completion)', () => {
+    // Builds a `run` mock that behaves like the real tool chain: the build-bundle.mjs call actually
+    // writes bytes to the bundle zip (so fileIdentity(bundleFile) has something real to hash), and the
+    // retrieval-accuracy.mjs call is intercepted so the test controls both its exit status and
+    // whatever report file (if any) it leaves behind.
+    const mockRun = ({ accuracyStatus, writeReport }) => {
+      const calls = [];
+      const run = (command, args) => {
+        calls.push([command, ...args]);
+        if (args.some((a) => /build-bundle\.mjs$/.test(a))) {
+          const outIndex = args.indexOf('--out');
+          const bundleFile = `${args[outIndex + 1]}.zip`;
+          fs.mkdirSync(path.dirname(bundleFile), { recursive: true });
+          fs.writeFileSync(bundleFile, 'fixture-archive-bytes');
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        if (args.some((a) => /oracle\/retrieval-accuracy\.mjs$/.test(a))) {
+          const bundleIndex = args.indexOf('--bundle');
+          const outIndex = args.indexOf('--out');
+          const bundleFile = args[bundleIndex + 1];
+          const reportFile = args[outIndex + 1];
+          if (writeReport) writeReport({ bundleFile, reportFile });
+          if (accuracyStatus !== 0) return { status: accuracyStatus, stdout: '', stderr: 'C3 below threshold' };
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      };
+      return { run, calls };
+    };
+
+    const validReportFor = (bundleFile) => {
+      const identity = { file: path.basename(bundleFile), sha256: crypto.createHash('sha256').update(fs.readFileSync(bundleFile)).digest('hex'), bytes: fs.statSync(bundleFile).size };
+      return {
+        schemaVersion: 2, kind: 'ruvnet-brain-retrieval-accuracy', state: 'FAIL', classification: 'diagnostic',
+        c3Eligible: false, archive: { sha256: identity.sha256, bytes: identity.bytes, file: identity.file },
+        oracle: {}, generator: {}, totals: { n: 1152, successes: 680 },
+      };
+    };
+
+    it('C3 exits nonzero but writes a valid report bound to this archive: reconcile proceeds', () => {
+      const root = candidateRoot();
+      const { run, calls } = mockRun({
+        accuracyStatus: 1,
+        writeReport: ({ bundleFile, reportFile }) => fs.writeFileSync(reportFile, JSON.stringify(validReportFor(bundleFile))),
+      });
+      const result = prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      });
+      // Proceeded all the way through the receipt build + verify steps that run AFTER the C3 call.
+      const joined = calls.map((call) => call.join(' '));
+      expect(joined.some((call) => /corpus-candidate\.mjs .*--verify/.test(call))).toBe(true);
+      expect(result.accuracyReportFile).toBe(path.join(root, 'candidate', 'ruvnet-brain.zip.accuracy.json'));
+    });
+
+    it('C3 exits nonzero with no report file at all: reconcile throws', () => {
+      const root = candidateRoot();
+      const { run } = mockRun({ accuracyStatus: 1 });
+      expect(() => prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      })).toThrow(/crashed with no valid report/i);
+    });
+
+    it('C3 exits nonzero with a report bound to a DIFFERENT archive: reconcile throws', () => {
+      const root = candidateRoot();
+      const { run } = mockRun({
+        accuracyStatus: 1,
+        writeReport: ({ reportFile }) => {
+          // Build a report bound to bytes that are NOT the real bundle's bytes.
+          const decoyFile = path.join(root, 'decoy-archive.zip');
+          fs.writeFileSync(decoyFile, 'not-the-real-archive');
+          fs.writeFileSync(reportFile, JSON.stringify(validReportFor(decoyFile)));
+        },
+      });
+      expect(() => prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      })).toThrow(/crashed with no valid report|not bound to this exact final archive/i);
+    });
+
+    it('deletes any stale leftover .accuracy.json before invoking the benchmark, so it cannot be mistaken for a fresh report', () => {
+      const root = candidateRoot();
+      const candidateDir = path.join(root, 'candidate', 'ruvnet-brain');
+      const staleReportFile = `${candidateDir}.zip.accuracy.json`;
+      fs.mkdirSync(path.dirname(staleReportFile), { recursive: true });
+      fs.writeFileSync(staleReportFile, JSON.stringify({ stale: true }));
+      let sawStaleAtInvocationTime = null;
+      const { run } = mockRun({
+        accuracyStatus: 0,
+        writeReport: ({ reportFile }) => {
+          sawStaleAtInvocationTime = fs.existsSync(reportFile);
+          fs.writeFileSync(reportFile, JSON.stringify({ fresh: true }));
+        },
+      });
+      prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir, receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      });
+      expect(sawStaleAtInvocationTime).toBe(false);
+      expect(JSON.parse(fs.readFileSync(staleReportFile, 'utf8'))).toEqual({ fresh: true });
+    });
+  });
 });
 
 describe('reconciliation output paths must never overlap the checkout, seed, or installed brain (rule 7)', () => {

@@ -18,7 +18,12 @@ const risks = [
   ['QE-CON-002', 'console', 'tests/unit/console-advocacy-precision.test.mjs'],
   ['QE-RES-001', 'resources', 'tests/unit/mcp-timeout-outage.test.mjs'],
   ['QE-RES-002', 'resources', 'tests/qe/gpt56/worker-concurrency-retirement.test.mjs'],
-  ['QE-REL-001', 'release', 'tests/qe/release/release-publish-contract.test.mjs'],
+  // release-publish-contract.test.mjs was retired in 00526b12 (2026-09-07, "qualify reviewed
+  // candidate once and retire automatic hooks"); its "GitHub Release/tag/assets/npm = one exact
+  // candidate" concern is now exercised by public-verification-lane's own identity-drift cases
+  // (e.g. its "public package drift" case, which mutates publication.npm.artifactSha256 and
+  // expects the exact /public byte identity/ rejection this risk names).
+  ['QE-REL-001', 'release', 'tests/unit/public-verification-lane.test.mjs'],
   ['QE-REL-002', 'release', 'tests/qe/release/packed-clean-install.test.mjs'],
   ['QE-FLT-001', 'fault-recovery', 'tests/unit/mcp-timeout-outage.test.mjs'],
   ['QE-FLT-002', 'fault-recovery', 'tests/qe/security/release-abuse-cases.test.mjs'],

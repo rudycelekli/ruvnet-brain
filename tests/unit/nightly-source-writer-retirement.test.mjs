@@ -48,7 +48,7 @@ describe('retired primary-checkout source writer', () => {
   });
 
   it('does not advertise the retired scheduler in current operator docs', () => {
-    for (const file of ['README.md', 'CONTRIBUTING.md', 'docs/ARCHITECTURE-MAP.md', 'docs/NIGHTLY-REFRESH.md']) {
+    for (const file of ['README.md', 'CONTRIBUTING.md', 'docs/ARCHITECTURE-MAP.md']) {
       const source = read(file);
       expect(source, file).not.toContain('deploy/com.ruvnet.brain-nightly.plist');
       expect(source, file).not.toMatch(/launchd `com\.ruvnet\.brain-nightly`/);

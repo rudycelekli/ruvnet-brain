@@ -33,6 +33,7 @@ import { loadRvf, loadTransformers, configureModel } from './resolve-deps.mjs';
 import { buildCorpus, FORGE_BUILD_FINGERPRINT } from './forge-corpus.mjs';
 import { buildCorpusLedger } from './incremental-refresh.mjs';
 import { persistAndVerifyRvfIndex } from './rvf-index.mjs';
+import { writeRvfGeneration, projectSourceStore } from '../scripts/rvf-generation.mjs';
 
 // Best-effort git provenance of the repo being indexed (for the evergreen SOURCE.json).
 function gitInfo(repoDir) {
@@ -225,27 +226,30 @@ function releasesApiUrl(canonicalBase) {
   return m ? `https://api.github.com/repos/${m[1]}/${m[2]}/releases/latest` : null;
 }
 {
-  const builtUtc = new Date().toISOString();
   const g = gitInfo(R);
   const base = CANONICAL_URL || null;
   const manifestUrl = releasesApiUrl(base);
+  // S4 (ONE PROVENANCE RECORD): stamp RVF-GENERATIONS.json FIRST; SOURCE.json's store entry is
+  // then a projection of that ledger row (projectSourceStore, scripts/rvf-generation.mjs) instead
+  // of an independent second construction of the same sourceRepo/sourceCommit/sourceDescribe/
+  // builtUtc facts. This build produces the MiniLM/384-dim "small" tier (`${NAME}.rvf`, not the
+  // BGE/768-dim "big" tier `canonicalRvfStores` discovers) — an explicit `rvfFile` names it.
+  const generation = writeRvfGeneration({
+    dir: OUT_DIR, store: NAME, rvfFile: `${NAME}.rvf`, model: 'Xenova/all-MiniLM-L6-v2', dimensions: 384,
+    sourceCommit: g.sha || null, sourceRepo: g.remote || R, sourceDescribe: g.describe || null,
+  });
   const source = {
     builder: 'rvf-kb-forge',
-    builtUtc,
+    builtUtc: generation.builtUtc,
     canonicalManifestUrl: manifestUrl,
     selfUpdate: 'node forge-update.mjs',
     stores: {
-      [NAME]: {
-        kbName: NAME,
-        sourceRepo: g.remote || R,
-        sourceCommit: g.sha || null,
-        sourceDescribe: g.describe || null,
-        builtUtc,
+      [NAME]: projectSourceStore(NAME, generation, {
         builder: 'rvf-kb-forge',
         canonicalManifestUrl: manifestUrl,
         canonicalBundleUrl: base ? `${base}/${NAME}-kb-bundle.zip` : null,
         selfUpdate: `node forge-update.mjs ${NAME}`,
-      },
+      }),
     },
   };
   const OUT_SOURCE = path.join(OUT_DIR, 'SOURCE.json');

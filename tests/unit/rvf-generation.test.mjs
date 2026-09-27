@@ -59,6 +59,32 @@ function fixtureDir() {
   return dir;
 }
 
+describe('writeRvfGeneration — sourceRepo/sourceDescribe (S4 schema addition)', () => {
+  it('omits sourceRepo/sourceDescribe entirely when not passed — every existing caller stays byte-identical', () => {
+    const dir = fixtureDir();
+    fs.writeFileSync(path.join(dir, 'demo.big.rvf'), 'demo');
+    const row = writeRvfGeneration({ dir, store: 'demo', model: 'bge', dimensions: 768, sourceCommit: 'abc1234' });
+    expect(row).toEqual({
+      file: 'demo.big.rvf', sha256: expect.any(String), bytes: 4, model: 'bge', dimensions: 768,
+      sourceCommit: 'abc1234', builtUtc: expect.any(String),
+    });
+    expect(Object.hasOwn(row, 'sourceRepo')).toBe(false);
+    expect(Object.hasOwn(row, 'sourceDescribe')).toBe(false);
+  });
+
+  it('records sourceRepo/sourceDescribe when passed, alongside the existing byte identity', () => {
+    const dir = fixtureDir();
+    fs.writeFileSync(path.join(dir, 'demo.big.rvf'), 'demo');
+    const row = writeRvfGeneration({ dir, store: 'demo', model: 'bge', dimensions: 768, sourceCommit: 'abc1234',
+      sourceRepo: 'https://github.com/ruvnet/demo', sourceDescribe: 'v1.2.3' });
+    expect(row.sourceRepo).toBe('https://github.com/ruvnet/demo');
+    expect(row.sourceDescribe).toBe('v1.2.3');
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, RVF_GENERATIONS_FILE), 'utf8'));
+    expect(persisted.stores.demo.sourceRepo).toBe('https://github.com/ruvnet/demo');
+    expect(persisted.stores.demo.sourceDescribe).toBe('v1.2.3');
+  });
+});
+
 describe('checksum-bound RVF generation identity', () => {
   it('discovers only canonical big RVFs and matches registry names case-insensitively', () => {
     const dir = fixtureDir();

@@ -69,10 +69,12 @@ jobs:
   # — all five OS jobs red together, which reads like a five-platform outage and is actually one
   # missing file.
   #
-  # MEASURED 2026-08-05: stranger-matrix passed 9 of 20 runs on main (45%). release-aggregate.yml
-  # requires ci AND stranger AND integration-linux AND ux-qe green on the SAME sha, so at
-  # 0.70 x 0.45 x 0.70 x 0.95 a release attempt succeeded about ONE TIME IN FIVE. This gate was the
-  # dominant term, and almost none of its failures were real findings.
+  # MEASURED 2026-08-05: stranger-matrix passed 9 of 20 runs on main (45%). The then-separate
+  # release-aggregate workflow required ci AND stranger AND integration-linux AND ux-qe green on
+  # the SAME sha, so at 0.70 x 0.45 x 0.70 x 0.95 a release attempt succeeded about ONE TIME IN
+  # FIVE. This gate was the dominant term, and almost none of its failures were real findings.
+  # (That workflow was deleted 2026-09-04 and consolidated into protected-release.yml plus
+  # release-candidate-preflight.yml, which now perform this same aggregate check — see ADR-0072.)
   #
   # The condition lives ONCE here and the five cells read it through `needs:`. Repeating an `if:`
   # five times is how the two host harnesses drifted apart; one fact, one place.

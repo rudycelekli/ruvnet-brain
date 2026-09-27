@@ -81,12 +81,15 @@
 
 **Files**:
 - `scripts/release.mjs` — orchestrator (exists, harden)
-- `.github/workflows/release.yml` — CI gate
+- `.github/workflows/protected-release.yml` — CI gate *(this plan predates it; the owner-dispatched
+  protected release workflow is what actually shipped — see CONTRIBUTING.md § Releasing)*
 - `package.json` — version script
 - Release checklist enforcement
 
 **Success Criteria**:
-- `npm run release` deploys to Vercel
+- A dispatch of the owner-gated protected release workflow deploys to Vercel *(this plan proposed
+  a bare `npm` script; no such script was built — see CONTRIBUTING.md § Releasing for the shipped
+  path)*
 - Version in package.json matches live deployment
 - Changelog updated + committed
 - Green CI before deploy
@@ -128,7 +131,8 @@
 
 **Result**: Ops +22, DevLoop +7, QA +12
 **Verification**: 
-- One deploy via `npm run release` succeeds
+- One dispatch of the owner-gated protected release workflow succeeds *(this plan proposed a bare
+  `npm` script; no such script was built — see CONTRIBUTING.md § Releasing for the shipped path)*
 - CI shows all checks green, publicly visible
 - Version in package.json matches deployed build
 

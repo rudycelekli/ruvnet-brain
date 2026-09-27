@@ -92,34 +92,30 @@ export const MIN_HEADROOM_MS = 3000;
  *   hijack-ruvnet       the managed-memory boundary (ADR-063): a correctness rule about where data
  *                       goes, ahead of anything about process.
  *   ground-before-write don't write RuvNet-product code ungrounded (ADR-0012).
- *   design-wall         don't ship a visual surface nobody looked at.
  *
  * `unprompted-speech` is LAST and is not really a peer: it is the speech chokepoint, which refuses
- * only for a lesson the user personally opted into blocking. It is included so that Write/Edit and
- * Bash have exactly ONE process that can refuse them — which is the entire invariant — and its
- * allow-path stdout envelope is forwarded untouched.
+ * only for a lesson the user personally opted into blocking. It is included so that Write/Edit have
+ * exactly ONE process that can refuse them — which is the entire invariant — and its allow-path
+ * stdout envelope is forwarded untouched.
+ *
+ * H5 (this repo's own dead-code audit): a 'bash' route used to sit alongside 'write' here, gating
+ * identifier-preflight, spend-guard, degradation-watch, hijack-ruvnet (a SECOND use, alongside its
+ * 'write' one) and design-wall on a PreToolUse-Bash event. It was never registered in
+ * plugin/hooks/hooks.json or codex-hooks.json — continuity-hook-policy.mjs's own header names this
+ * explicitly: "decision-gate's BASH route ... remains reachable through hook-shim's dispatch table
+ * by explicit invocation" only, never wired into the automatic plane. Removed as dead routing, not
+ * as a verdict on the four now-orphaned policies' worth: identifier-preflight.mjs, spend-guard.mjs,
+ * degradation-watch.mjs and design-wall.sh all remain in the tree with their own passing tests
+ * (each exports/exposes pure, independently-tested logic — `check`/`identifierIn`, `dependentEvent`,
+ * etc. — used elsewhere, e.g. tests/unit/lesson-gate.test.mjs imports degradation-watch.mjs's
+ * `dependentEvent` directly to cross-check lesson-hooks.sh's own pattern). Only their SELECTION by
+ * this gate's dead 'bash' route is removed here.
  */
 const POLICY = (id, file, interpreter = 'bash') => ({ id, file, interpreter });
 const REFUSAL_POLICIES = [
   POLICY('protect-state', 'protect-brain-state.sh'),
-  // degradation-watch sits second because it decides whether ANY record this system keeps is real.
-  // Measured 2026-08-13: better_sqlite3.node was built for NODE_MODULE_VERSION 141 against a node
-  // needing 137, ruflo fell back to sql.js, and nothing persisted for three days while every write
-  // printed `[OK] Data stored successfully`. A warning was printed on every one of those writes and
-  // read. It could not stop anything, because a warning is text and text is skimmable — so this is
-  // a refusal instead. It probes only for commands whose truth DEPENDS on durable memory (a lesson
-  // store, a ship), so ordinary Bash pays nothing.
-  POLICY('degradation-watch', 'degradation-watch.mjs', 'node'),
-  // identifier-preflight is FIRST among the cheap checks and costs one file read: it refuses a
-  // command that names a model this machine's CLI does not accept. `codex exec --model gpt-5.6`
-  // (correct: gpt-5.6-sol, in ~/.codex/config.toml) printed a 400 and EXITED 0 into a redirected
-  // file on 2026-08-13, so a 50-minute audit produced nothing and there was no exit code to catch.
-  // It refuses ONLY a positively-known-wrong value and allows every unknown, because a wall that
-  // fabricates a reason is one people learn to route around.
-  POLICY('identifier-preflight', 'identifier-preflight.mjs', 'node'),
   POLICY('hijack-ruvnet', 'hijack-ruvnet.sh'),
   POLICY('ground-before-write', 'ground-before-write.sh'),
-  POLICY('design-wall', 'design-wall.sh'),
   // adr-currency-gate fires on the EDIT, where the pre-push gate fires on the push. Same rule, same
   // machinery (it calls doc-currency.mjs, never a second copy of the logic) — moved to the earliest
   // moment it has enough information. On 2026-08-13 four ADRs went stale together and were caught
@@ -128,22 +124,12 @@ const REFUSAL_POLICIES = [
   // DEBT, not change: you may edit governed code freely, but not while a document governing it is
   // still unreconciled from the last round.
   POLICY('adr-currency', 'adr-currency-gate.mjs', 'node'),
-  // spend-guard refuses an agent FLEET that would inherit metered API keys. The $1,600 of
-  // agentic-qe#557: ~374 headless agents billed api.anthropic.com per-token for 11 hours while the
-  // Claude Max subscription sat unused. The rule was stored, ratified and severity:high — and
-  // delivered as advisory text, which is what gets skimmed. `claude` and `codex` are the seats and
-  // are never touched; OPENROUTER is metered and deliberately allowed, because cost-optimal routing
-  // exists to spend it and a gate that fires on the feature you configured is the gate you disable.
-  POLICY('spend-guard', 'spend-guard.mjs', 'node'),
 ];
 const SPEECH = { id: 'unprompted-speech', file: 'unprompted-runtime.mjs', interpreter: 'node' };
 
 /** Which policies apply to which PreToolUse sub-event, mirroring the matchers they replaced. */
 const REGISTRY = {
   'write': ['protect-state', 'hijack-ruvnet', 'ground-before-write', 'adr-currency'],
-  // degradation-watch is bash-only on purpose: the acts it guards — `ruflo memory store`, `git
-  // push` — are commands, so the dependency is observable there and nowhere else.
-  'bash': ['protect-state', 'identifier-preflight', 'spend-guard', 'degradation-watch', 'hijack-ruvnet', 'design-wall'],
 };
 
 export function policiesFor(event, registry = REGISTRY, all = REFUSAL_POLICIES) {
@@ -156,33 +142,22 @@ export function policiesFor(event, registry = REGISTRY, all = REFUSAL_POLICIES) 
 /**
  * ── APPLICABILITY: THE CHEAPEST POLICY IS THE ONE NEVER SPAWNED ──────────────────────────────────
  *
- * degradation-watch was spawned for EVERY Bash call and then exited 0 on its own second line — its
- * `dependentEvent()` returns null for anything that is not a ship or a memory store, which is nearly
- * everything. Measured here on 2026-08-14: 63-65ms of node boot bought to learn that `ls -la` is not
- * `git push`, on every single Bash tool call, on the machine where a node boot costs 60ms. On the
- * audit's machine that same boot is ~300ms.
- *
- * The predicate is IMPORTED, never restated. Copying the DEPENDENT_COMMANDS regexes up here would
- * make two answers to one question and guarantee they drift — the same reason adr-currency-gate calls
- * doc-currency.mjs instead of carrying a second copy of the logic.
- *
- * FAIL TOWARD RUNNING THE POLICY. If the import fails, or the predicate throws, the policy is
- * spawned exactly as before: this is a latency optimisation and it may never become a way to silently
- * disable a guard.
+ * H5: this table's one entry (degradation-watch, applicable only to the now-removed 'bash' route)
+ * was removed along with that route — see the REGISTRY comment above. The mechanism itself stays:
+ * an empty table costs nothing (skipReason below returns null immediately for every policy, so every
+ * currently-registered policy is consulted exactly as if this file did not exist), and it is the
+ * correct extension point for a future policy that only applies to SOME invocations of its event.
  */
-let dependentEvent = null;   // set from degradation-watch.mjs at startup; null → spawn it as before
 /**
  * Resolved once per invocation by the runtime block below; null means no bash on this host.
  *
- * Declared HERE, above that block, and not next to runPolicy() where it reads more naturally: the
- * `if (isMain())` block runs during module evaluation, so a `let` declared after it sits in the
- * temporal dead zone and the assignment throws — the identical mistake `speechEventFor` was already
- * a hoisted `function` to avoid, recorded a few lines further down.
+ * Declared HERE, and not next to runPolicy() where it reads more naturally: the `if (isMain())`
+ * block runs during module evaluation, so a `let` declared after it sits in the temporal dead zone
+ * and the assignment throws — the identical mistake `speechEventFor` was already a hoisted
+ * `function` to avoid, recorded a few lines further down.
  */
 let BASH = null;
-const APPLICABILITY = {
-  'degradation-watch': (input) => (dependentEvent ? Boolean(dependentEvent(input.command)) : true),
-};
+const APPLICABILITY = {};
 
 /** Returns a skip reason, or null if the policy must be consulted. */
 export function skipReason(policy, toolInput, table = APPLICABILITY) {
@@ -239,18 +214,15 @@ if (isMain()) {
   const payload = readPayload();
   const selected = policiesFor(EVENT);
   // An unknown event is not an occasion to refuse anything. Same rule as unprompted-runtime's
-  // "never speak on a guess", pointed at the other decision.
-  if (!selected.length && EVENT !== 'write' && EVENT !== 'bash') process.exit(ALLOW);
+  // "never speak on a guess", pointed at the other decision. 'write' is the only registered route
+  // (H5 removed the dead 'bash' one — see the REGISTRY comment above), so it is the only exception.
+  if (!selected.length && EVENT !== 'write') process.exit(ALLOW);
 
   const budgetMs = Number(process.env.RUVNET_DECISION_BUDGET_MS) || DEFAULT_BUDGET_MS;
   const deadline = started + budgetMs;
   // Resolved ONCE. On win32 resolveBash() can shell out to `where.exe`; four bash policies meant up
   // to four of those per tool call, for an answer that cannot change mid-invocation.
   BASH = resolveBash();
-  // Best-effort, and deliberately not a static import: a missing or broken degradation-watch.mjs
-  // must cost us the optimisation, not the whole gate. `runPolicy` already tolerates a missing
-  // policy file; a top-level `import` of it would have made that tolerance a lie.
-  try { ({ dependentEvent } = await import('./degradation-watch.mjs')); } catch { dependentEvent = null; }
 
   const trace = [];            // one row per policy — surfaced by RUVNET_DECISION_TRACE=1
   const unconsulted = [];      // policies the budget cost us. NEVER silent; see reportBudget().
