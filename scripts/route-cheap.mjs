@@ -39,10 +39,23 @@ export const PRICING = {
   'deepseek/deepseek-v4-flash': { in: 0.077, out: 0.154 }, // verified 2026-07-12 OpenRouter /models live; successor to deepseek-chat (which resolves to legacy V3)
   'x-ai/grok-4.5': { in: 2.0, out: 6.0 }, // verified 2026-07-12 OpenRouter /models live; mid-priced frontier-adjacent
 };
+// Named handles for the Claude tier ids below, so every OTHER file that needs one of these ids
+// imports it by NAME instead of retyping the literal a second time (single-source contract B7 —
+// calibrate-router.mjs, dispatch-receipt.mjs, router-utilization.mjs and metaharness-receipts.mjs
+// all used to hard-code their own copies of these same strings).
+export const CLAUDE_MODEL_IDS = Object.freeze({
+  haiku: 'claude-haiku-4.5',
+  sonnet: 'claude-sonnet-5',
+  opus: 'claude-opus-4.8',
+  fable: 'claude-fable-5',
+  opus5: 'claude-opus-5',
+  opus5Fast: 'claude-opus-5-fast',
+});
+
 // Frontier = the most capable model you'd otherwise reach for. Fable 5 leads the Claude 5 family
 // (2× Opus 4.8 per token — see CLAUDE_TIERS below), so it is the honest "instead of" baseline: every
 // $ the cascade saves is measured against what Fable 5 would have cost on the same tokens.
-export const FRONTIER = { name: 'claude-fable-5', in: 10.0, out: 50.0 };
+export const FRONTIER = { name: CLAUDE_MODEL_IDS.fable, in: 10.0, out: 50.0 };
 
 // Claude tiers — $/Mtok, verified live from the OpenRouter /models API 2026-07-13.
 // These are NOT routed through here (Claude Code's own Agent/Task tool spawns them). They are priced
@@ -51,10 +64,10 @@ export const FRONTIER = { name: 'claude-fable-5', in: 10.0, out: 50.0 };
 // whole router looked unused. It WAS unused; it was also unmeasurable. Both had to be fixed.
 // The spread is the whole argument: fable-5 costs 10x haiku-4.5 for identical mechanical work.
 export const CLAUDE_TIERS = {
-  'claude-haiku-4.5': { in: 1.0, out: 5.0 },
-  'claude-sonnet-5': { in: 2.0, out: 10.0 },
-  'claude-opus-4.8': { in: 5.0, out: 25.0 },
-  'claude-fable-5': { in: 10.0, out: 50.0 },
+  [CLAUDE_MODEL_IDS.haiku]: { in: 1.0, out: 5.0 },
+  [CLAUDE_MODEL_IDS.sonnet]: { in: 2.0, out: 10.0 },
+  [CLAUDE_MODEL_IDS.opus]: { in: 5.0, out: 25.0 },
+  [CLAUDE_MODEL_IDS.fable]: { in: 10.0, out: 50.0 },
   // OPUS 5 ADDED 2026-08-08, and its absence was silently costing every receipt.
   //
   // dispatch-receipt refuses to price an unknown model ("refusing to invent savings"), which is the
@@ -67,8 +80,8 @@ export const CLAUDE_TIERS = {
   // standing rule — never recalled, never inferred from the 4.8 row:
   //     anthropic/claude-opus-5        in $5.00/Mtok  out $25.00/Mtok
   //     anthropic/claude-opus-5-fast   in $10.00/Mtok out $50.00/Mtok
-  'claude-opus-5': { in: 5.0, out: 25.0 },
-  'claude-opus-5-fast': { in: 10.0, out: 50.0 },
+  [CLAUDE_MODEL_IDS.opus5]: { in: 5.0, out: 25.0 },
+  [CLAUDE_MODEL_IDS.opus5Fast]: { in: 10.0, out: 50.0 },
 };
 
 /** Price lookup across both tables. Unknown model → null (never invent a savings number). */

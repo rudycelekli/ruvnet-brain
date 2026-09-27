@@ -22,6 +22,15 @@ describe('classifyUpdaterExit typed result boundary', () => {
       .toEqual({ verdict: terminalVerdict, fallback: false, exitCode: 0 });
   });
 
+  it('S2: treats a rollback-protection refusal as a clean, non-fallback exit 0 — never a reported failure', () => {
+    // forge-update.mjs's currencyVerdict() REFUSED path (candidate corpus generation predates the
+    // installed one) writes terminalVerdict:'refused' and exits 0. Misclassifying it as
+    // 'invalid-result'/failed would turn the updater's own correct rollback-protection refusal into a
+    // reported --update failure — the same shape issue #106 fixed for the noop case, one gate later.
+    expect(install.classifyUpdaterExit(0, { requireResult: true, result: { terminalVerdict: 'refused' } }))
+      .toEqual({ verdict: 'refused', fallback: false, exitCode: 0 });
+  });
+
   it('fails closed when a nightly updater exits 0 without a typed result receipt', () => {
     expect(install.classifyUpdaterExit(0, { requireResult: true, result: null }))
       .toEqual({ verdict: 'invalid-result', fallback: false, exitCode: 1 });

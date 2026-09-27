@@ -356,6 +356,34 @@ describe('hook wiring — reachable from a real hook config, not merely mentione
     expect(row.sources.join(' ')).toMatch(/hook-shim id "my-id"/);
   });
 
+  // H6 (2026-09-26 dead-code audit): a hook-shim.mjs TABLE entry whose id no manifest ever dispatches
+  // used to read "wired" anyway, because once hook-shim.mjs itself became "reached" (it always is —
+  // every real hooks.json command literally names it), the GENERIC fixed-point pass treated hook-
+  // shim.mjs as an ordinary spawner and matched every quoted filename in its own TABLE, dispatched or
+  // not. This is exactly the shape that let design-wall.sh, route-dispatch.sh, verify-interface.sh,
+  // learn-capture.sh, learn-flush.mjs, md-stamp.mjs, signal-watch.mjs, routing-outcome-capture.mjs
+  // and swarm-slot-recycler.mjs all report "wired · via spawned by plugin/scripts/hook-shim.mjs" in
+  // the real repo while zero manifest dispatched most of their ids.
+  it('H6: a hook-shim.mjs TABLE entry whose id is NEVER dispatched by any manifest is NOT counted wired (RED on pre-fix code)', () => {
+    w('plugin/scripts/my-gate.sh', '#!/bin/bash\n# my-gate.sh — PreToolUse gate on Bash.\necho hi\n');
+    w('plugin/scripts/my-dead-gate.sh', '#!/bin/bash\n# my-dead-gate.sh — PreToolUse gate on Bash.\necho hi\n');
+    // hook-shim.mjs's TABLE lists BOTH ids, exactly like the real dispatch table — one genuinely
+    // dispatched below ("my-id"), one never mentioned by any manifest ("my-dead-id").
+    w('plugin/scripts/hook-shim.mjs', "const TABLE = {\n"
+      + "  'my-id': { file: 'my-gate.sh', interpreter: 'bash', mode: 'blocking' },\n"
+      + "  'my-dead-id': { file: 'my-dead-gate.sh', interpreter: 'bash', mode: 'blocking' },\n};\n");
+    w('plugin/hooks/hooks.json', JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command',
+        command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/hook-shim.mjs" my-id' }] }] },
+    }));
+    const res = hookWiringAudit({ repo, homeSettingsFile: NO_HOME(), held: {} });
+    // The genuinely-dispatched entry must still resolve — this fix must not cost real wiring.
+    expect(res.rows.find((r) => r.file === 'my-gate.sh').state).toBe('wired');
+    // The never-dispatched entry must NOT be reported wired via hook-shim.mjs alone.
+    const dead = res.rows.find((r) => r.file === 'my-dead-gate.sh');
+    expect(dead.state).not.toBe('wired');
+  });
+
   it('resolves Codex\'s installed Stable Spine wrapper and its adapter spawn', () => {
     w('plugin/scripts/codex-hook-wrapper.mjs', "import path from 'node:path';\n"
       + "const adapter = path.join(root, 'scripts', 'codex-hook-adapter.mjs');\n");

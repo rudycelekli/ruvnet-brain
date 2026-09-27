@@ -27,6 +27,8 @@ describe('early public artifact QE', () => {
     const early = workflow.indexOf('early-public-linux:');
     expect(early).toBeGreaterThan(-1);
     expect(early).toBeLessThan(aggregate);
-    expect(workflow).toContain('needs: [ci, integration, ux, stranger, early-public-linux, early-public-macos, early-public-windows]');
+    // macos-candidate-search (exact-candidate macOS host qualification, 1f1913d1) joined this gate
+    // after this assertion was first written; the aggregate now waits on it too.
+    expect(workflow).toContain('needs: [ci, integration, ux, stranger, early-public-linux, early-public-macos, early-public-windows, macos-candidate-search]');
   });
 });

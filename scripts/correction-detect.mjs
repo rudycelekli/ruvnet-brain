@@ -188,6 +188,8 @@
 // industrialised. `confidence` orders the ratification queue and does nothing else — a confidence
 // threshold is just ratification with the human removed and the word "confidence" in front of it.
 
+import { HARNESS_GENERATED_PATTERNS } from '../plugin/scripts/hook-input.mjs';
+
 /** Corrections are short. The measured tightened detector used this bound; specs and briefs exceed it. */
 export const MAX_UTTERANCE_CHARS = 800;
 
@@ -224,18 +226,15 @@ export const ACCEPTED_MISSES = Object.freeze([
  * speech at all. The detector was right to ignore them; the pool handed them to a human to label
  * anyway, burning ~29% of the scarcest resource in this whole problem (labelled examples) on rows
  * whose answer is definitionally "no", and diluting the base rate with them.
+ *
+ * H2 (2026-09-26): re-exported from plugin/scripts/hook-input.mjs's HARNESS_GENERATED_PATTERNS
+ * rather than kept as this file's own literal array. Other UserPromptSubmit consumers
+ * (unprompted-runtime.mjs, capacity-aware-parallel-work.mjs, grounding-turn-mark.mjs) needed the
+ * exact same recognition and, before this fix, had no shared place to get it from — hook-input.mjs
+ * is that ONE owner now; this name stays so correction-detect-measure.mjs and this file's own test
+ * do not need to change.
  */
-export const HARNESS_TEMPLATES = [
-  /\[Your previous response/i,
-  /\[Request interrupted/i,
-  /<\/?system-reminder>/i,
-  /<\/?(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|function_results|function_calls|budget)\b/i,
-  /^\s*Caveat:/i,
-  /Base directory for this skill:/i,
-  /This session is being continued from a previous conversation/i,
-  /^\s*#\s*claudeMd\b/im,
-  /\[INTELLIGENCE\]/i,
-];
+export const HARNESS_TEMPLATES = HARNESS_GENERATED_PATTERNS;
 
 /**
  * Pasted content, not speech. Includes markdown structure — this repository's own ADRs and DDDs are

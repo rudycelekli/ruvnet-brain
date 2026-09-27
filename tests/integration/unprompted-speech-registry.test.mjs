@@ -514,6 +514,20 @@ describe('closed world, functionally: the built-in registry reaches the real pro
     expect(ledgerRows(path.join(dir, 'route-outcomes.jsonl'), 'recommend:agentic-qe')).toEqual([]);
   });
 
+  it('a relevant advocacy candidate is withheld when the OFFERED receipt cannot persist', () => {
+    const outcomes = path.join(dir, 'outcomes-directory');
+    fs.mkdirSync(outcomes);
+    const env = { ...routeEnv(dir), RUVNET_SETTINGS_FILE: writeSettings('all'), RUVNET_ADVOCACY_OUTCOMES: outcomes };
+    const r = fireRuntime('UserPromptSubmit', {
+      producers: seam('persistence-failure.sh'),
+      env: { ...env, CANDIDATE_LINE: advocacyCandidate() },
+      payload: { prompt: 'a relevant quality gates request', session_id: 'receipt-failure' },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toBe('');
+  });
+
   it('a standalone copied plugin payload applies an actionable lesson without a marketplace fallback', () => {
     const payloadRoot = path.join(dir, 'standalone-plugin');
     fs.cpSync(path.join(ROOT, 'plugin'), payloadRoot, { recursive: true });
@@ -678,6 +692,33 @@ describe('the harness cannot kill the runtime before the runtime can answer', ()
       expect(outer.length, `${f}: no outer timeout found`).toBeGreaterThan(0);
       expect(inner.length, `${f}: no inner timeout found`).toBeGreaterThan(0);
       expect(Math.min(...outer), `${f}: outer must exceed inner`).toBeGreaterThan(Math.max(...inner));
+    }
+  });
+
+  // 2026-09-27, found live on a real Windows host: the test above only checks test-suite-declared
+  // timeouts against each other. It says nothing about the REAL default PRODUCER_TIMEOUT_MS against
+  // this hook's REAL declared timeout in hooks.json/codex-hooks.json — and those two drifted apart
+  // (a stale comment assumed a 5s hook budget; the actual registration is 3s), leaving no real
+  // margin once selfcheck.mjs's 80%-margin rule and real per-producer spawnSync overhead are counted.
+  // This is that missing check, against the actual production values, not a test's own fixtures.
+  it('the runtime\'s own default producer budget leaves real margin under its DECLARED hook timeout', () => {
+    const runtimeSrc = fs.readFileSync(RUNTIME, 'utf8');
+    const defaultMs = Number(runtimeSrc.match(/PRODUCER_TIMEOUT_MS\s*=\s*Number\([^)]*\)\s*\|\|\s*(\d+)/)?.[1]);
+    expect(defaultMs, 'could not find the default PRODUCER_TIMEOUT_MS in the runtime source').toBeGreaterThan(0);
+    for (const hooksFile of [HOOKS_JSON, path.join(ROOT, 'plugin', 'hooks', 'codex-hooks.json')]) {
+      const hooks = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+      const declaredTimeouts = (hooks.hooks?.UserPromptSubmit || [])
+        .flatMap((r) => r.hooks || [])
+        .filter((h) => /unprompted-speech/.test(h.command))
+        .map((h) => h.timeout)
+        .filter((t) => typeof t === 'number');
+      if (!declaredTimeouts.length) continue; // this host file may not register it — fine
+      const declaredMs = Math.min(...declaredTimeouts) * 1000;
+      const TIMEOUT_MARGIN = 0.8; // selfcheck.mjs's own rule — kept in sync here, not re-derived
+      expect(defaultMs, `${path.basename(hooksFile)}: default producer budget (${defaultMs}ms) leaves `
+        + `no real margin under the declared ${declaredMs}ms hook timeout at the ${TIMEOUT_MARGIN * 100}% mark, `
+        + 'even before Node startup or per-producer spawn overhead')
+        .toBeLessThan(declaredMs * TIMEOUT_MARGIN * 0.9); // 10% extra headroom for startup/spawn cost
     }
   });
 });

@@ -72,6 +72,21 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
+DIR="$HOME/.cache/ruvnet-brain/grounded"
+mkdir -p "$DIR" 2>/dev/null || exit 0
+
+# ── 2.5. THE ANY-SEARCH MARKER (H1 / GitHub #316). ──────────────────────────────────────────────
+# grounding-turn-gate.mjs's Stop-time check must treat ANY successful search_ruvnet this turn as
+# satisfying "a search happened" — independent of whether the query text below happens to contain
+# one of the recognised product terms. A query like "how should agent handoffs stay consistent"
+# grounds just as genuinely as one that names a product by name, and nothing should require the
+# model to re-word a real search just to satisfy a keyword scan. This mints into the SAME
+# directory grounding-turn-gate.mjs already scans for the newest mtime (newestGroundingStampMs),
+# so no change is needed on that side. Written unconditionally now that the success banner (step 2)
+# is confirmed, before the QUERY parse below — a search can succeed with a query this regex cannot
+# extract, and that must not cost it this signal.
+: > "$DIR/.any-search" 2>/dev/null || true
+
 # ── 3. WHICH terms — from the QUERY only, as it always was. The first raw "query" key in the JSON is
 # tool_input's; inside tool_response text the quotes are escaped (\"query\") so they cannot match.
 QUERY=""
@@ -79,12 +94,26 @@ re='"query"[[:space:]]*:[[:space:]]*"([^"]*)"'
 [[ $INPUT =~ $re ]] && QUERY="${BASH_REMATCH[1]}"
 [ -n "$QUERY" ] || exit 0
 
-DIR="$HOME/.cache/ruvnet-brain/grounded"
-mkdir -p "$DIR" 2>/dev/null || exit 0
-
-# Same product-term list as ground-before-write.sh — ONE list per concept, mirrored in both
+# WRITE_GATE terms — same product-term list as ground-before-write.sh's own copy, mirrored in both
 # files on purpose (a shared sourced file would add a dependency a blocking hook must not have).
-for t in agentdb metaharness ruvector aidefence agentic-flow agentic-qe ruv-swarm rvf ruflo; do
+# Do not change this list without mirroring ground-before-write.sh's copy — H1 keeps that gate's
+# per-product WRITE semantics untouched (see decision-gate.mjs / ground-before-write.sh for why
+# these 9 are scoped to code hand-rolling risk, not general rUv-ecosystem conversation).
+WRITE_GATE_TERMS="agentdb metaharness ruvector aidefence agentic-flow agentic-qe ruv-swarm rvf ruflo"
+
+# GATE-1-ONLY additions (H1 / GitHub #316): ruvnet-gate1-pattern.mjs's RUVNET_GATE1_PATTERN is the
+# ONE owner of this vocabulary — grounding-turn-mark.mjs already arms the Stop-time turn gate from
+# it. Before this fix, grounding-stamp.sh only recognised the 9 WRITE_GATE_TERMS above, so a search
+# literally about "ruvnet" (or "sparc", "qudag", "claude-flow", ...) minted no per-term stamp, and
+# combined with the missing any-search marker above, grounding-turn-gate.mjs wrongly reported "no
+# successful search_ruvnet call this turn" even though one had just happened. Terms already covered
+# by WRITE_GATE_TERMS are not repeated here. tests/unit/grounding-stamp-terms.test.mjs asserts
+# WRITE_GATE_TERMS plus GATE1_ONLY_TERMS together cover every RUVNET_GATE1_PATTERN alternative, so a
+# future addition to that pattern left unmirrored here goes red immediately (same idiom as
+# tests/unit/ruvnet-gate1-pattern.test.mjs's byte-identity check against ground-ruvnet.sh).
+GATE1_ONLY_TERMS="ruvnet agenticow rulake ruview rupixel ruv-fann synthlang dspy qudag safla cve-bench sparc swarm claude-flow ruv"
+
+for t in $WRITE_GATE_TERMS $GATE1_ONLY_TERMS; do
   [[ $QUERY == *"$t"* ]] && { : > "$DIR/$t" 2>/dev/null || true; }
 done
 

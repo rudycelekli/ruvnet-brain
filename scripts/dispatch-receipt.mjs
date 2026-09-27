@@ -25,7 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CLAUDE_TIERS, PRICING, estTokens, estimateCosts, receiptLine, receiptsPath, priceOf } from './route-cheap.mjs';
+import { CLAUDE_MODEL_IDS, CLAUDE_TIERS, PRICING, estTokens, estimateCosts, receiptLine, receiptsPath, priceOf } from './route-cheap.mjs';
 
 // Default input share when only a MEASURED TOTAL is known. A subagent's tokens are dominated by input
 // (it re-reads files and tool output on every turn); its final report is small. 0.9 is an assumption,
@@ -33,7 +33,7 @@ import { CLAUDE_TIERS, PRICING, estTokens, estimateCosts, receiptLine, receiptsP
 const DEFAULT_INPUT_SHARE = 0.9;
 
 export function parseArgs(argv) {
-  const args = { model: 'claude-haiku-4.5', inherited: 'claude-opus-4.8', class: 'mechanical' };
+  const args = { model: CLAUDE_MODEL_IDS.haiku, inherited: CLAUDE_MODEL_IDS.opus, class: 'mechanical' };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (['--model', '--inherited', '--task', '--class', '--in-chars', '--out-chars', '--label', '--total-tokens', '--split'].includes(k)) {
