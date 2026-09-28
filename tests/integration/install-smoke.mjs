@@ -150,6 +150,28 @@ test('the install smoke warms the same model cache used by the stable MCP runtim
     'smokeQuery must warm the same model cache used by the stable MCP runtime');
 });
 
+// Regression for the macOS public-verification failures on 2026-09-27 (runs 36324328134 job
+// 108636740357, 28.5-28.7s; and 36325803503 job 108638381147, 27.1-27.2s): this exact cold-model
+// first-run probe consistently blew the general 20s query deadline on macOS CI runners, twice in a
+// row, while never failing on Linux or Windows. The fix gives THIS ONE probe a larger, explicit
+// RUVNET_BRAIN_QUERY_DEADLINE_MS override (bounded, not disabled) instead of weakening the 20s
+// default that protects every normal warm query everywhere else.
+test('the install smoke gives the cold-start probe real margin over the measured macOS worst case, without weakening the default deadline', () => {
+  const source = fs.readFileSync(INSTALLER, 'utf8');
+  const m = source.match(/RUVNET_BRAIN_QUERY_DEADLINE_MS:\s*process\.env\.RUVNET_BRAIN_QUERY_DEADLINE_MS\s*\?\?\s*'(\d+)'/);
+  assert.ok(m, 'smokeQuery must pass an explicit RUVNET_BRAIN_QUERY_DEADLINE_MS override to the reader, defaulted (not forced) so a caller override still wins');
+  const overrideMs = Number(m[1]);
+  const measuredWorstCaseMs = 28700; // the slowest observed macOS run (36324328134)
+  assert.ok(overrideMs > measuredWorstCaseMs * 1.3,
+    `override (${overrideMs}ms) must leave real margin over the measured macOS worst case (${measuredWorstCaseMs}ms), not just barely clear it`);
+
+  const deadlineSource = fs.readFileSync(path.join(ROOT, 'kb', 'query-deadline.mjs'), 'utf8');
+  const defaultMatch = deadlineSource.match(/DEFAULT_QUERY_DEADLINE_MS\s*=\s*([\d_]+)/);
+  assert.ok(defaultMatch, 'kb/query-deadline.mjs must still export DEFAULT_QUERY_DEADLINE_MS');
+  assert.strictEqual(Number(defaultMatch[1].replace(/_/g, '')), 20_000,
+    'the general query deadline used by every normal warm query must remain untouched by this fix');
+});
+
 test('`--help` exits 0 and prints usage + flags', () => {
   const r = runInstaller(['--help']);
   assertClean(r, '--help');
@@ -754,6 +776,7 @@ test('`--doctor --hooks` goes RED when the selected installed plugin retains a h
     const registry = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
     fs.mkdirSync(path.dirname(registry), { recursive: true });
     fs.writeFileSync(registry, JSON.stringify({
+      version: 2,
       plugins: { 'ruvnet-brain@ruvnet-brain': [{ scope: 'user', version: '9.9.9', installPath: pluginRoot }] },
     }));
     const hangFixture = path.join(ROOT, 'tests', 'fixtures', 'selfcheck-hooks', 'hang.mjs');

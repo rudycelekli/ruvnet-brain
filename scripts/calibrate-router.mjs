@@ -26,18 +26,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { recordOutcome } from './metaharness-router.mjs';
-import { estimateCosts, estTokens } from './route-cheap.mjs';
+import { CLAUDE_MODEL_IDS, estimateCosts, estTokens } from './route-cheap.mjs';
 
 const CLAUDE = path.join(os.homedir(), '.npm-global/bin/claude');
 const RECEIPTS = process.env.METAHARNESS_RECEIPTS
   || path.join(os.homedir(), '.claude', 'metaharness', 'routing-receipts.jsonl');
 
 const MODELS = [
-  { alias: 'haiku', name: 'claude-haiku-4.5' },
-  { alias: 'sonnet', name: 'claude-sonnet-5' },
-  { alias: 'opus', name: 'claude-opus-4.8' },   // the baseline tier
+  { alias: 'haiku', name: CLAUDE_MODEL_IDS.haiku },
+  { alias: 'sonnet', name: CLAUDE_MODEL_IDS.sonnet },
+  { alias: 'opus', name: CLAUDE_MODEL_IDS.opus },   // the baseline tier
 ];
-const BASELINE = 'claude-opus-4.8';
+const BASELINE = CLAUDE_MODEL_IDS.opus;
 
 // Deterministic tasks: known answers, graded by regex — no LLM judge, no judgment calls.
 const TASKS = [
@@ -90,7 +90,7 @@ for (const [ti, task] of TASKS.entries()) {
   }
 }
 
-const cheap = results.flatMap((r) => [r.runs['claude-haiku-4.5'].ms]);
+const cheap = results.flatMap((r) => [r.runs[CLAUDE_MODEL_IDS.haiku].ms]);
 const base = results.map((r) => r.runs[BASELINE].ms);
 const sum = (a) => a.reduce((s, x) => s + x, 0);
 console.log(`\nhaiku total ${(sum(cheap) / 1000).toFixed(1)}s vs opus baseline ${(sum(base) / 1000).toFixed(1)}s on ${TASKS.length} tasks`);

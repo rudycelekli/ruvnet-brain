@@ -1,5 +1,5 @@
 {
-  "_note": "Project hooks intentionally empty after the 2026-09-04 stabilization. Repository policy is enforced by explicit CI and release commands, never by an automatic shell-command interceptor.",
+  "_note": "This project's own hooks (below) are intentionally empty — the ruvnet-brain plugin layer, not this file, supplies the automatic write gate (decision-gate) and the lifecycle hooks listed in plugin/hooks/hooks.json.",
   "env": {
     "RUFLO_HARNESS_LOOP": "1"
   },

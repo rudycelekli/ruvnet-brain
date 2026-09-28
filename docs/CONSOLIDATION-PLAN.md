@@ -1,5 +1,7 @@
 # Consolidation Plan — fewer seams, proven at real entry points
 
+> **Superseded 2026-09-26** — history only. Current status lives in docs/WORK-REGISTER.md.
+
 Updated: 2026-07-13
 
 `Created: 2026-07-13` · The plan Stuart approved after the 2.5.x diagnosis. **Read this first after any compaction.**

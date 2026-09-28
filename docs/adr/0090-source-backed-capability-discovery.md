@@ -3,7 +3,8 @@ id: ADR-090
 title: Additive source-verified capability discovery
 status: Accepted
 date: 2026-09-19
-updated: 2026-09-20
+updated: 2026-09-27
+updated_source: derived-from-git
 reviewed_digest: 0be7e2e73218
 authors: [Stuart Kerr, Codex]
 tags: [retrieval, routing, source-grounding, capability-discovery]
@@ -34,6 +35,8 @@ Updated: 2026-09-20 | Version 1.2.3
 Created: 2026-09-19
 
 # ADR-090 — Additive source-verified capability discovery
+
+**Status**: Accepted (2026-09-19)
 
 ## Context
 

@@ -100,6 +100,15 @@ describe('ADR-067 — one decision, composed from many policies', () => {
   it('an unknown event selects no policies', () => {
     expect(policiesFor('nonsense')).toEqual([]);
   });
+
+  it('H5: the dead \'bash\' route is gone — "bash" now selects nothing, same as any unregistered event (RED on pre-fix code)', () => {
+    // REGISTRY['bash'] used to list protect-state/identifier-preflight/spend-guard/degradation-watch/
+    // hijack-ruvnet/design-wall, and nothing in plugin/hooks/hooks.json or codex-hooks.json ever
+    // dispatched decision-gate.mjs with this event — continuity-hook-policy.mjs's own header names
+    // it explicitly: "decision-gate's BASH route ... remains reachable through hook-shim's dispatch
+    // table by explicit invocation" only. Removed as dead routing (2026-09-26 dead-code audit).
+    expect(policiesFor('bash')).toEqual([]);
+  });
 });
 
 /**
@@ -135,6 +144,12 @@ withBash('ADR-067 — the real gate, fired the way the host fires it', () => {
   it('an unknown sub-event allows rather than guessing', () => {
     expect(fire('nonsense', { file_path: '/tmp/x' }).code).toBe(0);
   }, 40_000);
+
+  it('H5: "bash" allows immediately, exactly like any other unregistered event — the dead route never runs a policy', () => {
+    const r = fire('bash', { command: 'git push' });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe('');
+  }, 40_000);
 });
 
 describe('ADR-067 — the structural invariant, read from hooks.json', () => {
@@ -169,8 +184,13 @@ describe('ADR-067 — the structural invariant, read from hooks.json', () => {
   });
 
   it('the policies the gate consults are no longer registered as hooks of their own', () => {
+    // H5: design-wall dropped out of this list — it was only ever consulted via the dead 'bash'
+    // route (REGISTRY['bash'], removed 2026-09-26 dead-code audit), never via 'write', so it is no
+    // longer "a policy the gate consults" at all. Its own hook-shim.mjs TABLE entry is untouched
+    // (still reachable by explicit invocation, per continuity-hook-policy.mjs's own design), which
+    // is exactly what this assertion would catch if it ever regained a SEPARATE hooks.json entry.
     const registered = (HOOKS.hooks.PreToolUse || []).flatMap((e) => e.hooks.map((h) => idOf(h.command)));
-    for (const owned of ['hijack-ruvnet', 'ground-before-write', 'protect-state', 'design-wall']) {
+    for (const owned of ['hijack-ruvnet', 'ground-before-write', 'protect-state']) {
       expect(registered, `${owned} must be consulted BY the gate, not race it`).not.toContain(owned);
     }
   });

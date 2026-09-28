@@ -3,8 +3,9 @@ id: ADR-061
 title: Subscription-only dual-host deliberation for hard problems
 status: Proposed
 date: 2026-07-28
-updated: 2026-09-11
-reviewed_digest: 6df53471296d
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 962ea30fdbcf
 authors: [Stuart Kerr, GPT-5.6-Sol]
 tags: [claude-code, codex, subscriptions, adr, ddd, agentic-qe, deliberation]
 supersedes: []
@@ -182,6 +183,7 @@ explicit. The outstanding two-host acceptance requirement is untouched by this r
 On 2026-08-10, **Re-read after #130/#131; subscription routing is unchanged.** Governed files moved for update-rail reasons only — rollback cardinality and symlink-guard scope. No provider path became implicit and opt-in remains explicit.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: a security fix stripping signing keys from native hosts, exit-0 guard closures, and a brain-census regeneration. The subscription-only deliberation logic is untouched; the security fix strengthens it. | Reviewed `scripts/subscription-hosts.mjs`, `scripts/dual-host-deliberation.mjs`, `scripts/dual-host-suggest.mjs`, `plugin/skills/ruvnet-brain/SKILL.md`, `tests/unit/subscription-hosts.test.mjs`, `tests/unit/dual-host-deliberation.test.mjs` against the commits listed above; reviewed_digest 962ea30fdbcf. |
 
 | Date | What changed | Why (with referents) |
 |---|---|---|

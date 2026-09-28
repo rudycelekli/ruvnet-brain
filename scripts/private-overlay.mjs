@@ -4,13 +4,23 @@
 //
 //   node scripts/private-overlay.mjs --root <kbDir> --from <sidecarDir> --store <name> [--store ...]
 //                                    [--dry-run] [--force] [--alias <name>=<nick,nick>] [--card <name>=<file>]
+//                                    [--origin <label>]
+//
+// `--origin` is stamped into SOURCE.json alongside updateManaged:false (omitted when not passed, so
+// every existing caller's output is byte-identical). scripts/ingest-repo.mjs passes `local-ingest`
+// (S3: explicit local ownership) so a repo pulled in on demand is distinguishable from a genuinely
+// private pre-built sidecar; `--from` may equal `--root` for that case (the bytes are already in
+// place — this writer degenerates to registry stamping only, since every file compares byte-equal
+// to itself).
 //
 // WHY THIS FILE EXISTS (measured 2026-09-11/12). kb/forge-update.mjs preserves exactly one thing
 // across a public bundle apply: SOURCE.json store entries flagged `updateManaged:false`
 // (capturePrivateOverlayState, kb/forge-update.mjs:356-358) — the capture then needs a matching
 // RVF-GENERATIONS.json row with a `file` (:369-372) and picks up `## <name>` cards and alias rows
-// (:402-408). restoreTreeExact (:570-591) deletes every name the bundle lacks. Nothing anywhere
-// WROTE that flag: forge-refresh's writeSourceManifest records public repos only, and
+// (:402-408). The apply path builds its candidate fresh from the extracted bundle
+// (`restorePrivateFilesIntoCandidate`, forge-update.mjs — the one apply path, S1), so every name the
+// bundle lacks is simply absent from that candidate. Nothing anywhere
+// WROTE that flag: forge-refresh's writeSourceManifestFromLedger records public repos only, and
 // ingest-repo.mjs builds from a git checkout with a canonical URL. So private stores that arrive as
 // pre-built sidecars had no writer, sat in the root unflagged, and 0 of 8 survived the 2026-09-10
 // tree replacement. This is that writer. It ADDS entries and never rebuilds top-level identity:
@@ -20,7 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { sha256File } from './rvf-generation.mjs';
+import { sha256File, projectSourceStore } from './rvf-generation.mjs';
 
 export const REQUIRED_SIDECARS = ['.big.rvf', '.big.rvf.embed.json', '.big.rvf.idmap.json', '.meta.json', '.passages.jsonl'];
 export const OPTIONAL_SIDECARS = ['.symbols.json', '-primer.md'];
@@ -94,7 +104,7 @@ function cardFor({ from, name, meta, cardFile }) {
   throw new Error(`${name}: no card source — add ${name}-primer.md to ${from}, or pass --card ${name}=<file>`);
 }
 
-function planStore({ root, from, name, force, aliases, cardFile }) {
+function planStore({ root, from, name, force, aliases, cardFile, origin }) {
   if (!NAME_RE.test(name)) throw new Error(`invalid store name: ${name}`);
   const missing = REQUIRED_SIDECARS.filter((suffix) => !isRegular(path.join(from, name + suffix)));
   if (missing.length) throw new Error(`${name}: missing sidecar(s) in ${from}: ${missing.map((suffix) => name + suffix).join(', ')}`);
@@ -121,10 +131,21 @@ function planStore({ root, from, name, force, aliases, cardFile }) {
   }
   const rvf = path.join(from, `${name}.big.rvf`);
   const card = cardFor({ from, name, meta, cardFile });
+  const generation = { file: `${name}.big.rvf`, sha256: sha256File(rvf), bytes: fs.statSync(rvf).size, model: embed.model, dimensions: embed.dimensions, sourceCommit: null, builtUtc };
   return {
-    name, files, copies, card, aliases,
-    generation: { file: `${name}.big.rvf`, sha256: sha256File(rvf), bytes: fs.statSync(rvf).size, model: embed.model, dimensions: embed.dimensions, sourceCommit: null, builtUtc },
-    source: { kbName: name, updateManaged: false, builtUtc, sourceCommit: null, sourceRepo: 'private', canonicalManifestUrl: null },
+    name, files, copies, card, aliases, generation,
+    // S4 (ONE PROVENANCE RECORD): source.sourceCommit/builtUtc are projected from `generation`
+    // above (projectSourceStore, scripts/rvf-generation.mjs) rather than a second, independent
+    // copy of the same facts. A private store has no selfUpdate/canonicalBundleUrl/builder —
+    // those are public-bundle-only fields, so they are simply never passed in the updater here.
+    // `origin` is opt-in (omitted entirely when not supplied, never written as null/undefined) so a
+    // caller that does not pass it gets the exact byte-identical stamp this writer has always
+    // produced. S3 (explicit local ownership): scripts/ingest-repo.mjs passes origin:'local-ingest'
+    // so a store this brain pulled in on demand is distinguishable, in SOURCE.json itself, from one
+    // that arrived as a genuinely private pre-built sidecar (a bare "private" sourceRepo alone conflated
+    // the two before this).
+    source: projectSourceStore(name, generation, { updateManaged: false, sourceRepo: 'private',
+      canonicalManifestUrl: null, ...(origin ? { origin } : {}) }),
   };
 }
 
@@ -132,7 +153,7 @@ function planStore({ root, from, name, force, aliases, cardFile }) {
  * Add private stores to a live brain root. Idempotent; refuses before writing anything; snapshots
  * every registry it is about to change to `<file>.pre-overlay-<epoch>` first; temp+rename writes.
  */
-export function applyPrivateOverlay({ root, from, stores, dryRun = false, force = false, aliases = {}, cards = {}, now = Date.now }) {
+export function applyPrivateOverlay({ root, from, stores, dryRun = false, force = false, aliases = {}, cards = {}, now = Date.now, origin = null }) {
   root = path.resolve(String(root || ''));
   from = path.resolve(String(from || ''));
   if (!Array.isArray(stores) || !stores.length) throw new Error('at least one --store <name> is required');
@@ -158,7 +179,7 @@ export function applyPrivateOverlay({ root, from, stores, dryRun = false, force 
     schemaVersion: 1, kind: 'ruvnet-brain-private-overlay-receipt', at: new Date(now()).toISOString(),
     root, from, dryRun, force, stores: [],
   };
-  const plans = stores.map((name) => planStore({ root, from, name, force, aliases: aliases[name], cardFile: cards[name] }));
+  const plans = stores.map((name) => planStore({ root, from, name, force, aliases: aliases[name], cardFile: cards[name], origin }));
   for (const plan of plans) {
     const { name } = plan;
     if (!fence.has(name.toLowerCase())) {
@@ -226,6 +247,7 @@ function parseArgs(argv) {
     else if (flag === '--force') options.force = true;
     else if (flag === '--alias') { const [name, list] = pair(next(), flag); options.aliases[name] = list.split(',').map((s) => s.trim()).filter(Boolean); }
     else if (flag === '--card') { const [name, file] = pair(next(), flag); options.cards[name] = path.resolve(file); }
+    else if (flag === '--origin') options.origin = next();
     else throw new Error(`unknown argument: ${flag}`);
   }
   if (!options.root || !options.from || !options.stores.length) {

@@ -15,10 +15,6 @@ const STYLE = ' — Style: dark near-black background (#0b0d0f) with a faint blu
 
 const IMAGES = [
   { slug: 'hero', size: '1536x1024', p: 'A luminous intricate three-dimensional structure resembling a brain fused with a vast interconnected codebase: thousands of glowing amber and cyan filaments forming one elegant organized sphere of intelligence, floating in dark space, a sense of all knowledge made orderly and alive.' },
-  { slug: 'problem-skim', size: '1536x1024', p: 'A vast deep canyon made of densely stacked layers of code and documents descending far into darkness; a single small fragile light hovers at the very top only grazing the surface, never reaching the immense depth below. The feeling of skimming and missing everything underneath.' },
-  { slug: 'point-deeper', size: '1536x1024', p: 'One precise clean beam of warm amber light cutting straight down through many deep translucent strata of a vast structure to perfectly illuminate a single exact point far below; surgical precision locating the one true answer in the depths.' },
-  { slug: 'architecture', size: '1536x1024', p: 'An elegant isometric exploded view of five translucent glass layers floating one above another in dark space, each a slightly different luminous tone, joined by thin vertical conduits of light; a refined premium product render of a clean layered system.' },
-  { slug: 'proof', size: '1536x1024', p: 'Three distinct elegant luminous measuring instruments aim converging beams of light onto a single crystalline object at center that glows confident green, while one beam exposes a hidden flaw glowing warning red; independent rigorous verification against a single source of truth.' },
 ];
 
 async function gen(model, prompt, size) {

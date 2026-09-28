@@ -77,8 +77,12 @@ export const heartbeat = ({ env, hookDir, stateDir, home, running, seedDispatche
     if (/\bBEHIND\b/.test(read(kbLog))) {
       emit('[RuvNet Brain — a newer knowledge bundle is available. It is signed (Ed25519) and the updater verifies that signature before extracting anything. We do NOT auto-apply it: applying replaces executable tool files, which is your call. To update: cd ~/.cache/ruvnet-brain/kb && node forge-update.mjs --apply]');
     }
+    // S2 (ONE CURRENCY VERDICT): --result-file records the SAME structured verdict --check/--apply
+    // and bin/install.mjs already read (forge-update.mjs's currencyVerdict()), at the well-known path
+    // session-start-core.mjs's banner stage reads it from — so the banner's own "is my code out of
+    // sync" alarm reads this recorded verdict instead of re-deriving its own comparison.
     dispatchDetached(hookDir, 60, kbLog, process.execPath,
-      [path.join(kbDir, 'forge-update.mjs'), '--check'], env);
+      [path.join(kbDir, 'forge-update.mjs'), '--check', '--result-file', path.join(stateDir, '.last-kb-check-result.json')], env);
   }
   const versionLog = path.join(stateDir, '.last-version-check.log');
   const remoteVersion = firstVersion(read(versionLog));

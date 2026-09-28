@@ -13,7 +13,7 @@ not all individually audited and remain diagnostics. A diagnostic pass is not pr
 Promote only the clean exact candidate SHA and its sealed artifacts after qualification. Public
 acceptance still requires all nine OS/host-mode leaves plus real native installed-update proof on
 each platform, ending at `install-verified`. Imported upstream corpus freshness remains UNKNOWN
-until separately proven. See `docs/QA-RELEASE-PROCESS.md` and the audit records in `docs/reviews/`.
+until separately proven. See `CONTRIBUTING.md` and the audit records in `docs/reviews/`.
 
 ---
 

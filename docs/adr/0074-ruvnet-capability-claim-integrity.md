@@ -3,8 +3,9 @@ id: ADR-074
 title: RuvNet capability claims require live evidence
 status: Accepted
 date: 2026-08-22
-updated: 2026-09-12
-reviewed_digest: 3dc633e7f906
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 0e03e3459a3b
 version: 1.1.1
 authors: [Stuart Kerr, Codex]
 tags: [architecture, truthfulness, capabilities, hosts, evidence, receipts]
@@ -139,6 +140,7 @@ tests establish request-envelope behavior, not native-host continuation or a sig
 result. Cross-platform, public-byte, false-positive, and aggregate obligations remain unproven.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: continuation-gate anti-faking correction, managed-CLI interruption/continuity fixes, and Codex post-tool validation. The capability-claim integrity model is unchanged; these close real bugs in its enforcement. | Reviewed `docs/ddd/0020-capability-claim-integrity-context.md`, `plugin/scripts/capability-inventory-receipt.mjs`, `plugin/scripts/capability-claim-evidence.mjs`, `plugin/scripts/continuation-gate.mjs`, `plugin/mcp/managed-cli-interface.mjs`, `kb/forge-evidence.mjs` against the commits listed above; reviewed_digest 0e03e3459a3b. |
 
 | 2026-09-12 | `continuation-gate.mjs` moved: `--commit-to` never actually armed the Stop-forcing gate — it wrote to `led.items`, which the forcing logic doesn't read; only `led.objective` does, and nothing ever wrote that. Fixed so `--commit-to` writes a real `led.objective` (session-wildcarded, per `continuation-objective.mjs`'s documented `'*'` exception); reverted an earlier wrong fix that derived an objective from any open ledger item, which broke the deliberate "legacy items never auto-force" safety test. No other governed path moved. | Reviewed `plugin/scripts/continuation-gate.mjs`, `plugin/scripts/continuation-objective.mjs`, `tests/unit/continuation-gate.test.mjs` (new fail-first CLI-level test, RED→GREEN). reviewed_digest bf4be44519d7. |
 | 2026-09-11 | Currency review at commit 7296c984: decision unchanged — only `plugin/hooks/hooks.json` and `codex-hooks.json` moved (plane retired `00526b12`, restored `56420430` / `9c45d408`, the session break `76632b15` reverted, gates `7b8e6e73`); `continuation-gate` remains registered on Stop for both hosts (`hooks:check` PASS). `plugin/scripts/capability-inventory-receipt.mjs`, `capability-claim-evidence.mjs`, `continuation-gate.mjs`, `plugin/mcp/managed-cli-interface.mjs`, `kb/forge-evidence.mjs`, `plugin/scripts/codex-hook-adapter.mjs` did not move. The console's gates card (`d61c05d3`) now reports S-12-relevant truth on the owner's machine: six on-disk blocking gates with no registration. | Reviewed `plugin/hooks/hooks.json`, `plugin/hooks/codex-hooks.json`, `plugin/scripts/continuation-gate.mjs`. reviewed_digest 3dc633e7f906. |
