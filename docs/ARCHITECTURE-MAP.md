@@ -458,7 +458,7 @@ this degrades *visibly* — which is the design. You can also refresh by hand:
 `node ~/.cache/ruvnet-brain/kb/forge-update.mjs`.
 
 The full separation and author-worktree contract are in
-[Nightly refresh, evaluation, and author rebuilds](NIGHTLY-REFRESH.md).
+[CONTRIBUTING.md § The knowledge corpus](../CONTRIBUTING.md#the-knowledge-corpus).
 
 ---
 

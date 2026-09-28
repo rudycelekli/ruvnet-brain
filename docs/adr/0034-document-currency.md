@@ -3,9 +3,10 @@ id: ADR-034
 title: A document's status is a claim about code — derive it, stamp it with something you cannot type from memory
 status: Proposed
 date: 2026-07-22
-updated: 2026-09-11
+updated: 2026-09-27
+updated_source: derived-from-git
 version: 1.2.0
-reviewed_digest: bf6225c58ce2
+reviewed_digest: 1ab15b7012c1
 impl: wired
 governs:
   - scripts/doc-currency.mjs
@@ -430,6 +431,7 @@ profile check, and it holds here for the same reason.
    the same session family*, in two different shapes. Worth fixing; not worth coupling to this.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: audit-cache scoping and the exit-0 silent-guard closure in doc-currency.mjs itself. Both harden the checker; the currency model this ADR describes is unchanged (and this very review is produced by that model). | Reviewed `scripts/doc-currency.mjs`, `scripts/git-hooks/pre-push` against the commits listed above; reviewed_digest 1ab15b7012c1. |
 
 | 2026-09-11 | Currency review at commit 2eef2024: code drifted, corrected in the text above (not the status). `scripts/git-hooks/pre-push` no longer calls `scripts/doc-currency.mjs` — commit `00526b12` reduced it to a credential-only scan; the currency decision itself survives, relocated to `plugin/scripts/adr-currency-gate.mjs` (edit-time, ADR-067) and `scripts/release-vector.mjs --changed` (release-time, ADR-058). | Reviewed `scripts/doc-currency.mjs` and `scripts/git-hooks/pre-push`; also read `scripts/development-push-check.mjs`, `plugin/scripts/adr-currency-gate.mjs`, and `scripts/release-vector.mjs` to confirm where enforcement actually runs now. reviewed_digest bf6225c58ce2. |
 | 2026-09-05 | Reviewed source aad901b08c28; findings recorded, not semantic verification. | `scripts/doc-currency.mjs` and `scripts/git-hooks/pre-push` were fully examined by the assigned audit reviewer; root inspected the implementation/review/drift paths and tested the integrated changes. The current-boundary section records unimplemented claim-ledger validation and default-policy differences. This review closes only missing-review inference, not those implementation gaps. |

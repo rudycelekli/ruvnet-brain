@@ -654,6 +654,15 @@ export function livePublicationAdapter({ root = process.cwd(), candidateRoot = r
         }
       }
       const result = await session.search({ query, k, timeoutMs: DEADLINE_MS });
+      if (result.error || !result.mcpResult || (Object.hasOwn(result, 'status') && result.status !== 0)) {
+        // Same guard as warmupInstalled() above and host-install-matrix.mjs's equivalent canary
+        // search: without it, a real timeout on this full-corpus search reaches
+        // parseRetrievalResult() with no mcpResult, which throws the generic "UNKNOWN:
+        // incompatible MCP response lacks structured retrieval results" — masking a timeout as a
+        // data-shape error. This is the release blocker traced from v4.3.28's public verification
+        // failure ("retrieval canary acceptance failed for claude", run 35559726522).
+        throw new Error(`installed Brain search failed for ${mode} (query="${query}"): ${result.error?.message || `no MCP result within ${DEADLINE_MS}ms`}`);
+      }
       return parseRetrievalResult(result.mcpResult, { query, k });
     },
 

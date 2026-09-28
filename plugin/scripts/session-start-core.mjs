@@ -283,8 +283,6 @@ export async function runSessionStart({
       } else if (running) {
         write(path.join(stateDir, '.dev-version'), `${running}\n`);
       }
-      const source = json(path.join(home, '.cache', 'ruvnet-brain', 'kb', 'SOURCE.json'), {});
-      const kbVersion = typeof source?.releaseTag === 'string' ? source.releaseTag : '';
       const readiness = mcpReadiness(env, home);
 
       const grounding = json(path.join(stateDir, 'install-state.json'));
@@ -315,10 +313,18 @@ export async function runSessionStart({
       // alarm mechanism as HEALTH ALARM above (never gated by maintainerIssueEntitlement).
       emit(`[RuvNet Brain v${bannerVersion} — active this session${updated ? ` · updated ${updated}` : ''}]`);
       bannerEmitted = true;
-      const bundleTag = String(kbVersion).replace(/^v/, '');
-      if (bundleTag && bannerVersion !== 'unknown' && bundleTag !== bannerVersion) {
+      // S2 (ONE CURRENCY VERDICT): this no longer compares the KB's own SOURCE.json releaseTag to the
+      // plugin version — that heuristic fires a FALSE POSITIVE for the entire (normal, expected)
+      // window between the plugin auto-updating and the KB's own background --check catching up, and
+      // it duplicated, less accurately, a comparison kb/forge-update.mjs already makes properly
+      // (against the LIVE canonical release, not a locally-observed string). Instead this reads the
+      // recorded verdict from the SessionStart heartbeat's own `--check --result-file` run — the SAME
+      // structured verdict --apply and bin/install.mjs read — and only alarms on a genuine CODE-release
+      // mismatch (a corpus-only update does not mean the plugin's own code is out of sync).
+      const kbCheck = json(path.join(stateDir, '.last-kb-check-result.json'));
+      if (kbCheck?.currencyVerdict === 'UPDATE_AVAILABLE' && kbCheck?.candidateKind === 'code') {
         emit('🚨 [RuvNet Brain — INSTALL ALARM: plugin and knowledge bundle are out of sync] 🚨');
-        emit(`Your plugin is v${bannerVersion} but the knowledge bundle on this machine is v${bundleTag} — they are meant to ship together, so search results may not match this plugin's behavior yet. Fix: npx ruvnet-brain@latest --update (or reinstall: npx github:stuinfla/ruvnet-brain --force).`);
+        emit(`${kbCheck.currencyReason || 'a newer code release is available'} — they are meant to ship together, so search results may not match this plugin's behavior yet. Fix: npx ruvnet-brain@latest --update (or reinstall: npx github:stuinfla/ruvnet-brain --force).`);
       }
 
       const hookContracts = readHookContracts(path.join(pluginRoot, 'hooks', 'hook-contracts.json'));

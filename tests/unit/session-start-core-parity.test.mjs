@@ -205,10 +205,11 @@ function parity(configure, attempts = 3) {
 function healthyKb({ cache }) {
   write(path.join(cache, 'kb/public.big.rvf'), 'rvf');
   write(path.join(cache, 'kb/node_modules/@xenova/transformers/package.json'), '{}');
-  // Matches makeFixture's hardcoded plugin.json version on purpose: a "healthy" baseline is one
-  // where the plugin and its knowledge bundle ARE in sync, so this fixture does not spuriously
-  // trip the split-generation INSTALL ALARM in every other test in this file. See the dedicated
-  // "plugin/bundle generation split" test below for that alarm's own coverage.
+  // Matches makeFixture's hardcoded plugin.json version. The split-generation INSTALL ALARM (S2:
+  // ONE CURRENCY VERDICT) no longer reads this file at all — it reads the SessionStart heartbeat's
+  // OWN recorded `.last-kb-check-result.json` verdict instead, which no test in this file writes by
+  // default, so the alarm never spuriously trips here. See the dedicated "plugin/bundle generation
+  // split" test below for that alarm's own coverage.
   write(path.join(cache, 'kb/SOURCE.json'), { releaseTag: '4.0.2-test' });
 }
 
@@ -469,15 +470,44 @@ describe.skipIf(process.platform === 'win32')('host-neutral SessionStart core pa
   it('delivers a plugin/knowledge-bundle generation split to EVERY user, never labeled maintainer-only', () => {
     const result = parity((f) => {
       warmed(f);
-      // No maintainer entitlement file at all — this must still show. Deliberately mismatch the KB
-      // releaseTag against makeFixture's hardcoded plugin version ('4.0.2-test').
-      write(path.join(f.cache, 'kb/SOURCE.json'), { releaseTag: '9.9.9-mismatch' });
+      // No maintainer entitlement file at all — this must still show. S2 (ONE CURRENCY VERDICT): the
+      // banner reads the SessionStart heartbeat's own recorded verdict (forge-update.mjs's
+      // currencyVerdict(), persisted via --result-file) rather than comparing SOURCE.json's releaseTag
+      // to the plugin version itself — simulate exactly that recorded verdict, a genuine CODE-release
+      // mismatch against makeFixture's hardcoded plugin version ('4.0.2-test').
+      write(path.join(f.cache, '.last-kb-check-result.json'), {
+        currencyVerdict: 'UPDATE_AVAILABLE', candidateKind: 'code',
+        currencyReason: 'code release v9.9.9-mismatch supersedes v4.0.2-test',
+      });
     });
     expect(result.output).toContain('INSTALL ALARM');
     expect(result.output).toContain('4.0.2-test');
     expect(result.output).toContain('9.9.9-mismatch');
     expect(result.output).not.toContain('MAINTAINER ONLY');
     expect(result.output).not.toContain('Do NOT surface this to the user');
+  });
+
+  it('does NOT alarm on a mismatched local SOURCE.json releaseTag alone — that comparison is gone (S2)', () => {
+    // The OLD behavior: a bare SOURCE.json releaseTag mismatch, with no recorded currency verdict at
+    // all, used to trip the alarm unconditionally. It must not any more — absence of a recorded
+    // verdict is not evidence of drift (the same "never claim what you cannot prove" contract
+    // currencyVerdict's own UNKNOWN case follows).
+    const result = parity((f) => {
+      warmed(f);
+      write(path.join(f.cache, 'kb/SOURCE.json'), { releaseTag: '9.9.9-mismatch' });
+    });
+    expect(result.output).not.toContain('INSTALL ALARM');
+  });
+
+  it('does NOT alarm on a corpus-only recorded verdict — a corpus update does not mean the plugin code is out of sync', () => {
+    const result = parity((f) => {
+      warmed(f);
+      write(path.join(f.cache, '.last-kb-check-result.json'), {
+        currencyVerdict: 'UPDATE_AVAILABLE', candidateKind: 'corpus',
+        currencyReason: 'corpus generation 2026-09-05T00:00:00.000Z supersedes installed 2026-09-01T00:00:00.000Z',
+      });
+    });
+    expect(result.output).not.toContain('INSTALL ALARM');
   });
 
   it('shows exactly one banner line, and derives the lifecycle-hooks sentence from hook-contracts.json rather than a hardcoded "grounding" claim', () => {

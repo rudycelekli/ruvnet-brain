@@ -78,7 +78,6 @@ const STANDALONE = [
   ['dream-issue-gate', 'pure Dream Cycle disposition policy; invoked by the external issue adapter, never a GitHub writer'],
   ['sync-census', 'explicit maintainer census writer; a destructive source-to-surface refresh is never scheduled'],
   ['sync-commands', 'explicit maintainer alias synchronizer; run deliberately before release, never from a lifecycle hook'],
-  ['version-bump-gate', 'retired automatic interceptor; explicit version checks own release validation'],
   ['project-progression-checkpoint', 'the body of the shipped `/ruvnet-brain:checkpoint` command '
     + '(plugin/commands/checkpoint.md:39; added a7167b6b 2026-09-11). The command host executes that '
     + 'instruction, and this check does not scan command markdown — the same shape as '
@@ -89,6 +88,10 @@ const STANDALONE = [
     + '.claude/worktrees/ — their package.json copies had been counted as callers all day.'],
   ['lesson-seed', 'one-shot seeding, run deliberately by a human'],
   ['lesson-ratify', 'the human control surface — a CLI is its entire purpose'],
+  ['lesson-migrate-agentdb', 'one-time reconciliation between the two AgentDB lesson stores and the '
+    + 'one plugin lesson store, run deliberately by a human/model, never scheduled. Completion is '
+    + 'proven and kept honest by tests/unit/lesson-migrate-agentdb.test.mjs (0 pending rows), a drift '
+    + 'canary rather than automated invocation — the same shape as lesson-seed/lesson-ratify above.'],
   ['stamp-sweep', 'ADR-056 §2 — the ONE-TIME backfill half of the stamp rule. A human runs it once '
     + '(--apply) to reach the files nobody is editing; the ongoing half is the md-stamp PostToolUse '
     + 'hook, which IS wired. Deliberately not in a gate: it WRITES to documents, and a writer that '
@@ -109,9 +112,6 @@ const STANDALONE = [
   ['fix-metaharness-memretrieve', 'one-shot historical repair; kept for the record'],
   ['gen-console-images', 'build-time asset generation, run by hand'],
   ['adr-backfill', 'one-shot backfill by a human; its result is enforced by adr-format.test.mjs'],
-  ['stamp-existing-rvf-generations', 'one-shot maintainer migration that binds already-built canonical '
-    + 'RVFs to RVF-GENERATIONS.json and optionally prunes legacy sidecars; build-bundle.mjs consumes '
-    + 'and validates the resulting manifest, so scheduling this destructive migration would be wrong'],
   ['release', 'the ship path, run by a human'],
   ['execution-preflight', 'external orchestration boundary — invoked by the host before consequential Ruflo/Codex execution; no in-repo caller exists because the host supplies the live Brain and AgentDB receipts'],
   ['fix-workstream', 'session-supervised coordination CLI run explicitly by the integration owner or an '
@@ -230,6 +230,27 @@ const STANDALONE = [
     + 'ground-before-write. Per ADR-0014 ownership moved to the Kling skill (confirmed live: a copy '
     + 'ships at ~/.claude/skills/klingai/scripts/kling-preflight.sh); NOT currently wired into any '
     + 'settings.json there either — honestly dormant until a user opts in, not a silent gap'],
+
+  // H5 (2026-09-26 dead-code audit): decision-gate.mjs's REGISTRY['bash'] was the only production
+  // caller of these three — never registered in plugin/hooks/hooks.json or codex-hooks.json
+  // (continuity-hook-policy.mjs's own header: "remains reachable through hook-shim's dispatch table
+  // by explicit invocation" only). Removing that dead route makes each of these genuinely uncalled
+  // by any product path. Not deleted: each exports pure, independently-tested logic with its own
+  // passing suite — identifier-preflight.test.mjs / spend-guard.test.mjs import and exercise these
+  // functions directly, and tests/unit/lesson-gate.test.mjs imports degradation-watch.mjs's
+  // `dependentEvent` to cross-check lesson-hooks.sh's own pattern. A test importing an export is not
+  // a product caller (same distinction this file already draws for correction-detect-measure above),
+  // so these are honestly STANDALONE rather than silently left to read as still-wired.
+  ['identifier-preflight', 'H5: orphaned by decision-gate.mjs\'s dead bash route (REGISTRY[\'bash\'] '
+    + 'removed 2026-09-26). Pure `check`/`identifierIn` logic remains directly imported and exercised '
+    + 'by its own tests/unit/identifier-preflight.test.mjs; no product path calls it'],
+  ['spend-guard', 'H5: orphaned by decision-gate.mjs\'s dead bash route (REGISTRY[\'bash\'] removed '
+    + '2026-09-26). Its logic remains directly imported and exercised by its own '
+    + 'tests/unit/spend-guard.test.mjs; no product path calls it'],
+  ['degradation-watch', 'H5: orphaned by decision-gate.mjs\'s dead bash route (REGISTRY[\'bash\'] '
+    + 'removed 2026-09-26). Its `dependentEvent` export remains directly imported by '
+    + 'tests/unit/lesson-gate.test.mjs (cross-checked against lesson-hooks.sh\'s own pattern) and by '
+    + 'its own test file; no product path calls it'],
 ];
 // REMOVED 2026-07-22, each verified before removal:
 //   check-legibility / check-indexation / status-honesty — claimed "invoked from the workflow";
@@ -889,9 +910,24 @@ export function hookWiringAudit({
   const scriptsDir = path.join(repo, 'plugin/scripts');
   let all = [];
   try { all = fs.readdirSync(scriptsDir).filter((f) => /\.(mjs|sh)$/.test(f)); } catch { /* no dir */ }
+  // H6 (2026-09-26 dead-code audit): hook-shim.mjs is a DISPATCH TABLE, not a script that
+  // unconditionally executes everything it mentions. `scanConfig()` above already proves reachability
+  // for a TABLE entry CORRECTLY — only when its id is genuinely dispatched by a real command string in
+  // a manifest. Letting hook-shim.mjs ALSO participate as a "from" in the generic fixed-point pass
+  // below double-counts every OTHER entry in its TABLE as "spawned", because the pass's own predicate
+  // (callerPattern) matches any quoted filename — and every TABLE entry is, by construction, a quoted
+  // filename in hook-shim.mjs's source, dispatched or not. Measured: before this exclusion,
+  // design-wall.sh, route-dispatch.sh, verify-interface.sh, learn-capture.sh, learn-flush.mjs,
+  // md-stamp.mjs, signal-watch.mjs, routing-outcome-capture.mjs and swarm-slot-recycler.mjs all read
+  // "wired · via spawned by plugin/scripts/hook-shim.mjs" while zero manifest (hooks.json,
+  // codex-hooks.json, this repo's or the user's settings.json) ever dispatches most of their ids —
+  // exactly the false positive this check exists to catch. Excluding it here does not remove any
+  // GENUINE reachability: every id hook-shim.mjs's TABLE actually dispatches was already added by
+  // scanConfig() above, before this loop runs at all.
   for (let i = 0; i < 10; i++) {
     let changed = false;
     for (const from of [...reached.keys()]) {
+      if (from === 'hook-shim.mjs') continue;
       const src = sourceCache.commentFree(path.join(scriptsDir, from));
       if (src === null) continue;
       for (const cand of all) {

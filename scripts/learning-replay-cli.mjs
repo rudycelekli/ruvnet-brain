@@ -35,6 +35,7 @@ import {
   writeArtifact,
 } from './learning-replay-proof.mjs';
 import { ROOT } from './learning-replay-contract.mjs';
+import { GPT_5_6_SOL_ID } from './review-model-defaults.mjs';
 
 const usage = () => `Usage:
   node scripts/learning-replay.mjs [--trap ${TRAP.MEMORY_SEARCH}|${TRAP.POST_TASK}] [--n N] [--host codex|claude-code] [--model MODEL]
@@ -94,7 +95,7 @@ export async function main(argv = process.argv.slice(2)) {
   const mutant = arg('--mutant', null);
   const trap = arg('--trap', TRAP.MEMORY_SEARCH);
   const host = arg('--host', 'codex');
-  const model = arg('--model', host === 'codex' ? 'gpt-5.6-sol' : 'haiku');
+  const model = arg('--model', host === 'codex' ? GPT_5_6_SOL_ID : 'haiku');
   const n = Math.max(1, parseInt(arg('--n', mutant ? '1' : '3'), 10) || 1);
   const outFile = arg('--out', mutant
     ? MUTANT_RESULT_FILES[trap]?.[mutant]

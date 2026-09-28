@@ -5,13 +5,14 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { probeSubscriptionHosts, subscriptionOnlyEnv } from './subscription-hosts.mjs';
+import { DUAL_HOST_MODEL_IDS } from './review-model-defaults.mjs';
 
 const HOSTS = Object.freeze(['claude-code', 'codex']);
 // Top subscription models verified on the native hosts on 2026-09-10.
 // Keep these explicit: an implicit host default silently weakens the dual review.
 export const TOP_SUBSCRIPTION_MODELS = Object.freeze({
-  'claude-code': 'claude-fable-5-1',
-  codex: 'gpt-6-astra',
+  'claude-code': DUAL_HOST_MODEL_IDS.claude,
+  codex: DUAL_HOST_MODEL_IDS.codex,
 });
 const HARD_PROBLEM = /\b(adr|architecture|architect|ddd|bounded context|aggregate|agentic[- ]?qe|holistic|security|production|migration|irreversible|threat model|experience)\b/i;
 

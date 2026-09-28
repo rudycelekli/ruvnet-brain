@@ -19,6 +19,7 @@ import {
   PROJECT_B_MEMORY_VALUE,
   RUFLO_BIN,
 } from './learning-replay-execution.mjs';
+import { GPT_5_6_SOL_ID } from './review-model-defaults.mjs';
 
 const CLAUDE_BIN = process.env.RUVNET_CLAUDE_BIN
   || path.join(os.homedir(), '.npm-global', 'bin', 'claude');
@@ -266,7 +267,7 @@ export function codexReplayInstrumentationError(events, sequence, attempts) {
 }
 
 export function buildCodexArgv({
-  model = 'gpt-5.6-sol',
+  model = GPT_5_6_SOL_ID,
   prompt = REPLAY_PROMPT,
   appendSystemPrompt = null,
   brainHome,

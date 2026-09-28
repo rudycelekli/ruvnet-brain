@@ -34,7 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readStdinBounded } from './hook-input.mjs';
+import { readStdinBounded, isHarnessGenerated } from './hook-input.mjs';
 import { ruvnetGate1Matches } from './ruvnet-gate1-pattern.mjs';
 
 const HOME = os.homedir();
@@ -54,6 +54,11 @@ export function shouldMark(hookInput) {
   if (!hookInput || hookInput.hook_event_name !== 'UserPromptSubmit') return false;
   if (!hookInput.session_id) return false;
   const text = String(hookInput.prompt ?? hookInput.user_prompt ?? hookInput.input ?? '');
+  // H2: a background task notification, slash-command scaffold, or other harness-authored message
+  // arrives on UserPromptSubmit exactly like real user text — arming the Stop-time grounding gate off
+  // one of these (because it happens to mention a rUv term) would demand a search_ruvnet call to
+  // close out a "turn" nobody had a hand in.
+  if (isHarnessGenerated(text)) return false;
   return ruvnetGate1Matches(text);
 }
 

@@ -21,6 +21,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { FULL_HINTS, KEEP_DIRS } from './full-hints.mjs';
 import { storeRoot } from '../kb/store-root.mjs';
+import { applyPrivateOverlay } from './private-overlay.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (f, d) => { const i = process.argv.indexOf(f); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
@@ -118,15 +119,58 @@ const carded = (() => {
 // The stores themselves cannot be committed. The FACT that they were ingested can, so a wipe
 // becomes detectable and replayable instead of silent and permanent. This record is the recipe.
 if (ok) {
+  let rest = [];
   try {
     const ledger = path.join(ROOT, 'kb', 'local-ingests.json');
     const prior = fs.existsSync(ledger) ? JSON.parse(fs.readFileSync(ledger, 'utf8')) : { ingests: [] };
-    const rest = (prior.ingests || []).filter((e) => e.name !== NAME);
+    rest = (prior.ingests || []).filter((e) => e.name !== NAME);
     rest.push({ name: NAME, org: ORG, at: new Date().toISOString(), store: kb });
     rest.sort((a, b) => a.name.localeCompare(b.name));
     fs.writeFileSync(ledger, `${JSON.stringify({ ingests: rest }, null, 2)}\n`);
     console.log(`[record] kb/local-ingests.json — ${rest.length} local ingest(s) recorded. COMMIT THIS.`);
   } catch (e) { console.log(`[record] could not record the ingest: ${e.message}`); }
+
+  // S3 (explicit local ownership): stamp updateManaged:false + origin:'local-ingest' into the LIVE
+  // store root's own SOURCE.json (via scripts/private-overlay.mjs's writer — --from equals --root
+  // here, since forge-refresh.mjs already wrote the bytes directly into KB; the writer degenerates
+  // to registry-stamping only, see its own header). Without this a store built through THIS script
+  // reads exactly like a normal public store to kb/forge-update.mjs — unmarked, and therefore
+  // silently deleted the moment it is absent from an incoming public bundle.
+  //
+  // ONE-TIME MIGRATION for stores this script ingested BEFORE this fix shipped: every OTHER name
+  // this ledger already recorded is retroactively re-stamped too, provided its files still exist and
+  // it is not already an update-managed (public) SOURCE.json entry. This runs HERE — where the
+  // recipe ledger (kb/local-ingests.json, git-tracked in the checkout) and the live store root (KB,
+  // ~/.cache/ruvnet-brain/kb by default — a DIFFERENT, non-git-tracked directory, see kb/store-
+  // root.mjs) are both actually in scope in the same process — rather than inside kb/forge-update.mjs,
+  // which runs against an installed KB tree with no reliable path back to this checkout's ledger.
+  const candidateNames = [...new Set([kb, ...rest.map((e) => e.store).filter(Boolean)])];
+  const sourceFile = path.join(KB, 'SOURCE.json');
+  let liveSourceStores = {};
+  try { liveSourceStores = JSON.parse(fs.readFileSync(sourceFile, 'utf8')).stores || {}; } catch { /* handled by applyPrivateOverlay below */ }
+  const toStamp = candidateNames.filter((name) => {
+    const existing = liveSourceStores[name];
+    if (existing && existing.updateManaged !== false) return false; // a real public store — never shadow it
+    return [`${name}.big.rvf`, `${name}.big.rvf.embed.json`, `${name}.big.rvf.idmap.json`, `${name}.meta.json`, `${name}.passages.jsonl`]
+      .every((file) => fs.existsSync(path.join(KB, file)));
+  });
+  if (toStamp.length) {
+    try {
+      const fenceFile = path.join(KB, 'PRIVATE-STORES.json');
+      const fence = fs.existsSync(fenceFile) ? JSON.parse(fs.readFileSync(fenceFile, 'utf8')) : { privateStores: [] };
+      const fenceNames = new Set((fence.privateStores || []).map((n) => String(n).toLowerCase()));
+      const additions = toStamp.filter((name) => !fenceNames.has(name.toLowerCase()));
+      if (additions.length) {
+        fence.privateStores = [...new Set([...(fence.privateStores || []), ...additions])].sort();
+        fs.writeFileSync(fenceFile, `${JSON.stringify(fence, null, 2)}\n`);
+      }
+      const receipt = applyPrivateOverlay({ root: KB, from: KB, stores: toStamp, origin: 'local-ingest' });
+      const stamped = receipt.stores.filter((entry) => entry.changes.includes('SOURCE.json')).map((entry) => entry.name);
+      if (stamped.length) console.log(`[local-ownership] marked updateManaged:false (origin: local-ingest) — ${stamped.join(', ')}`);
+    } catch (e) {
+      console.log(`[local-ownership] could not stamp local ownership (${e.message}); the next forge-update.mjs --apply may remove ${toStamp.join(', ')} if they are absent from the incoming bundle`);
+    }
+  }
 }
 
 console.log(!ok

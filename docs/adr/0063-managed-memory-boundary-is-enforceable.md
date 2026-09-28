@@ -3,8 +3,9 @@ id: ADR-063
 title: The managed-memory boundary is enforceable, opt-in, and default-off
 status: Accepted
 date: 2026-08-06
-updated: 2026-09-11
-reviewed_digest: 3d03ffa5ae80
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 1efa96a3fcb7
 authors: [Stuart Kerr, Claude Code]
 tags: [enforcement, memory, agentdb, hooks, consent, issue-103]
 supersedes: []
@@ -153,6 +154,7 @@ line-scan miss as a standing regression so nobody "simplifies" it back.
   matcher with its own tests — and by the default staying `advise`.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: hook-shim TABLE corrections and new hooks (capacity-aware parallel work, Codex decision-gate/grounding-stamp extension). These extend enforcement to Codex; the memory-boundary invariant itself is unchanged. | Reviewed `plugin/scripts/hijack-ruvnet.sh`, `plugin/scripts/hook-shim.mjs`, `plugin/hooks/hooks.json`, `scripts/user-settings.mjs` against the commits listed above; reviewed_digest 1efa96a3fcb7. |
 
 | Date | What changed | Why (with referents) |
 |---|---|---|

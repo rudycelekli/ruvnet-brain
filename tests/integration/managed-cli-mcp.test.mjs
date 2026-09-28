@@ -143,6 +143,13 @@ function startServer(fx, extraEnv = {}) {
       RUVNET_BRAIN_HOME: path.join(fx.root, 'brain'),
       RUVNET_BRAIN_KB: fx.kb,
       RUVNET_BRAIN_PROJECT_SETTINGS_FILE: path.join(fx.root, 'absent-project-settings.json'),
+      // Isolate managed-progression's projectRoot to the fixture, never the real REPO checkout the
+      // server spawns from (cwd: REPO, needed to resolve its own modules). Without this, a dev
+      // checkout that has ever run a real ruflo command locally carries a real, gitignored .swarm/
+      // dir, which flips managedProgressionCapture's `adopted` branch on and makes these fixtures
+      // depend on ambient developer-machine state instead of being hermetic. CI never has a stray
+      // .swarm/ dir, so this only ever bit locally.
+      RUVNET_BRAIN_PROJECT_DIR: fx.root,
       ...extraEnv,
     },
   });

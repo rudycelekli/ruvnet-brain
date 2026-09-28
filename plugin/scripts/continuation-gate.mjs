@@ -226,6 +226,77 @@ if (has('--done')) {
   process.exit(0);
 }
 
+/**
+ * H4: the continuation objective could never be closed. `--commit-to` writes `led.objective` with
+ * `state: 'active'` (above), and the Stop-side allow-list at ~275 already checks for
+ * `['cancelled', 'completed', 'blocked'].includes(led.objective?.state)` — but until now NOTHING
+ * ever wrote one of those three states, so an objective, once opened, forced every Stop for the rest
+ * of the project's life (short of `--clear`, which also wipes every unrelated ledger ITEM — a
+ * blunt instrument for closing one objective). These two verbs are the missing other half of
+ * `--commit-to`: they touch ONLY `led.objective`, leaving `led.items` untouched, and each REQUIRES
+ * its evidence/reason text — an empty completion would be exactly the "marked done without doing
+ * it" fabrication this whole gate exists to refuse (see the "THE HONEST EXIT" note below on why a
+ * genuinely dead item must be closed with a recorded reason, never silently). Nothing here runs
+ * automatically; both are explicit, human/model-invoked CLI verbs only.
+ */
+if (has('--complete-objective')) {
+  const evidence = arg('--complete-objective');
+  if (!evidence || !evidence.trim()) {
+    console.error('--complete-objective requires evidence: --complete-objective "<what proves it is done>"');
+    process.exit(2);
+  }
+  const led = load();
+  if (led.objective) {
+    // DERIVED from the required argument checked above, not asserted (ADR-0024 / status-honesty.mjs):
+    // this line is unreachable with blank/missing evidence — the guard exits 2 first. That proves an
+    // explicit, human/model-invoked CLI action supplied named evidence; it does not verify the
+    // evidence is TRUE, which is exactly why continuation-objective.mjs's own header already
+    // documents this ledger as non-authoritative ("neither prove user provenance nor establish task
+    // completion") — a nudge-suppression preference with the reason attached for audit, not a
+    // verified fact standing in for a real completion check.
+    led.objective.state = evidence.trim() ? 'completed' : led.objective.state;
+    led.objective.completedAt = new Date().toISOString();
+    led.objective.completionEvidence = evidence;
+  }
+  save(led);
+  console.log(led.objective ? `objective completed: ${evidence}` : 'no objective to complete');
+  process.exit(0);
+}
+
+if (has('--cancel-objective')) {
+  const reason = arg('--cancel-objective');
+  if (!reason || !reason.trim()) {
+    console.error('--cancel-objective requires a reason: --cancel-objective "<why this objective no longer applies>"');
+    process.exit(2);
+  }
+  const led = load();
+  if (led.objective) {
+    led.objective.state = 'cancelled';
+    led.objective.cancelledAt = new Date().toISOString();
+    led.objective.cancellationReason = reason;
+  }
+  save(led);
+  console.log(led.objective ? `objective cancelled: ${reason}` : 'no objective to cancel');
+  process.exit(0);
+}
+
+if (has('--help') || has('-h')) {
+  console.log([
+    'usage: continuation-gate.mjs <verb> [args]  (no verb + JSON on stdin = the Stop hook itself)',
+    '',
+    '  --commit-to "<text>"               record work the model agreed to do; opens/reopens the',
+    '                                      objective as state: active',
+    '  --done "<exact item text>"         mark a plain ledger item done (exact text match only)',
+    '  --complete-objective "<evidence>"  close the current objective as state: completed, with the',
+    '                                      completion evidence recorded — leaves other ledger items',
+    '                                      untouched',
+    '  --cancel-objective "<reason>"      close the current objective as state: cancelled, with the',
+    '                                      reason recorded — leaves other ledger items untouched',
+    '  --clear                            wipe the ENTIRE ledger: every item AND the objective',
+  ].join('\n'));
+  process.exit(0);
+}
+
 if (has('--clear')) { save({ items: [] }); console.log('ledger cleared'); process.exit(0); }
 
 // ── the Stop hook itself (default action) ────────────────────────────────────────────────────────
