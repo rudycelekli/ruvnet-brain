@@ -117,6 +117,7 @@ describe('protected corpus-seed release authority', () => {
 
   it.each([
     ['target differs from HEAD', (f) => { f.args = replaceArg(f.args, '--target', 'f'.repeat(40)); }],
+    ['target is not a 40-hex SHA (format checked first)', (f) => { f.args = replaceArg(f.args, '--target', '--upload-pack=touch'); }],
     ['GITHUB_SHA differs from HEAD', (f) => { f.env.GITHUB_SHA = 'f'.repeat(40); }],
     ['receipt source differs from target', (f) => { f.receipt.builderSourceSha = 'f'.repeat(40); writeReceipt(f); }],
   ])('refuses when %s', async (_name, mutate) => {
@@ -125,6 +126,29 @@ describe('protected corpus-seed release authority', () => {
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/target.*HEAD.*GITHUB_SHA.*receipt/i);
+    expect(fs.existsSync(f.log)).toBe(false);
+  });
+
+  // Independent review of ADR-0091 D3 (2026-09-28): target must EQUAL GITHUB_SHA. Accepting "GITHUB_SHA
+  // or an ancestor of it" let the unattended corpus job promote an OLDER runtime over the live release.
+  it('refuses when GITHUB_SHA is not a descendant of the target (target is off protected main\'s history)', async () => {
+    const f = await fixture();
+    f.env.GITHUB_SHA = execFileSync('git', ['rev-parse', 'HEAD~1'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/target.*HEAD.*GITHUB_SHA.*receipt/i);
+    expect(fs.existsSync(f.log)).toBe(false);
+  });
+
+  it('REFUSES when GITHUB_SHA is a newer main commit descending from the target (an ancestor is not enough)', async () => {
+    const f = await fixture();
+    // A real commit whose parent is HEAD, created as a dangling object (no ref, no working-tree change).
+    f.env.GITHUB_SHA = execFileSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost',
+      'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'fixture: a newer main commit'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    expect(f.env.GITHUB_SHA).not.toBe(HEAD);
+    const result = run(f);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toMatch(/target must exactly equal HEAD, GITHUB_SHA, and the corpus receipt builderSourceSha/);
     expect(fs.existsSync(f.log)).toBe(false);
   });
 

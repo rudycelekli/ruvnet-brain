@@ -20,7 +20,7 @@ import { fileIdentity } from '../plugin/scripts/coverage-integrity.mjs';
 import { readDiagnosticAccuracyReport } from './oracle/retrieval-accuracy.mjs';
 import { storeRoot } from '../kb/store-root.mjs';
 import { captureGistSources } from './gist-receipts.mjs';
-import { projectSourceStore } from './rvf-generation.mjs';
+import { projectSourceStore, RUNTIME_LEDGER_KIND } from './rvf-generation.mjs';
 
 export { rebuildCorpusAggregates };
 
@@ -119,6 +119,40 @@ function filesNamed(root, wanted) {
   return found;
 }
 
+// ADR-0091 D4 -- the ONE seed property that cannot be judged before download. corpus-next-seed.mjs
+// judges a published generation's embedding model and recall report from small files, but the
+// generation ledger lives only inside the archive, so its schema is checked here, right after
+// extraction and BEFORE anything is moved. A mismatch is not a corrupt seed: it is a seed this runtime
+// cannot consume (a ledger-schema change is a code-release event). It is thrown as a distinct error
+// and main() exits SEED_LEDGER_INCOMPATIBLE_EXIT with the assets directory untouched, so
+// corpus-seed.yml can re-run seed extraction ONCE from the committed bootstrap in the same job.
+export const SEED_LEDGER_SCHEMA_VERSION = 2;
+export const SEED_LEDGER_INCOMPATIBLE_EXIT = 3;
+
+export class SeedLedgerIncompatibleError extends Error {
+  constructor(reason) {
+    super(`[corpus-reconcile] seed ledger is incompatible with this runtime: ${reason}`);
+    this.name = 'SeedLedgerIncompatibleError';
+    this.reason = reason;
+  }
+}
+
+/** null when this runtime can consume the ledger, else the reason it cannot. */
+export function seedLedgerIncompatibility(ledger) {
+  if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return 'RVF-GENERATIONS.json is not an object';
+  if (ledger.schemaVersion !== SEED_LEDGER_SCHEMA_VERSION || ledger.kind !== RUNTIME_LEDGER_KIND) {
+    return `RVF-GENERATIONS.json is schemaVersion ${JSON.stringify(ledger.schemaVersion ?? null)} kind ${JSON.stringify(ledger.kind ?? null)}; `
+      + `this runtime reads schemaVersion ${SEED_LEDGER_SCHEMA_VERSION} kind ${RUNTIME_LEDGER_KIND}`;
+  }
+  if (!ledger.stores || typeof ledger.stores !== 'object' || Array.isArray(ledger.stores)) return 'RVF-GENERATIONS.json has no stores object';
+  return null;
+}
+
+// Moves the corpus root's TOP-LEVEL entries only (directories such as keys/, primer/ and l2/ move
+// whole). Nothing is filtered out: a seed's own runtime files (.mjs, package.json) are harmless here,
+// because build-bundle.mjs copies only named store files and the sealed prose from --assets and takes
+// every runtime module from the checkout (ADR-0091 D4 withdrew the 0.1.0 "strip" step for that reason,
+// and because source-coverage.mjs hard-reads capability-cards.md from these assets).
 export function normalizeExtractedCorpus({ extractedDir, assetsDir }) {
   const extracted = path.resolve(extractedDir || '');
   const assets = path.resolve(assetsDir || '');
@@ -128,6 +162,11 @@ export function normalizeExtractedCorpus({ extractedDir, assetsDir }) {
   if (fs.existsSync(assets) && fs.readdirSync(assets).length) fail(`bootstrap assets directory is not empty (${assets})`);
   const ledgers = filesNamed(extracted, 'RVF-GENERATIONS.json');
   if (ledgers.length !== 1) fail(`seed archive must contain exactly one RVF-GENERATIONS.json; found ${ledgers.length}`);
+  let seedLedger;
+  try { seedLedger = JSON.parse(fs.readFileSync(ledgers[0], 'utf8')); }
+  catch (error) { throw new SeedLedgerIncompatibleError(`RVF-GENERATIONS.json is unreadable (${error.message})`); }
+  const incompatibility = seedLedgerIncompatibility(seedLedger);
+  if (incompatibility) throw new SeedLedgerIncompatibleError(incompatibility);
   const corpusRoot = path.dirname(ledgers[0]);
   // A published seed's own PRIVATE-STORES.json is AUTHENTICATED HISTORICAL EVIDENCE of what that
   // prior round excluded — never the current builder's live policy. Keep it under a distinct name
@@ -304,6 +343,33 @@ export async function acquireSealedGeneration({ maxAttempts = 3, assetsDir = nul
   fail(`sealed generation incomplete after ${maxAttempts} acquisition attempt(s): `
     + `${last.remainingArtifacts ?? 'unknown'} artifact(s) and ${last.unresolvedSources ?? 'unknown'} `
     + 'eligible source(s) remain unresolved against the sealed manifest');
+}
+
+/**
+ * The ONE reader of an acquisition result's per-attempt history (ADR-0091 D1).
+ *
+ * WHY THIS EXISTS. cd0f032f renamed the loop's history from `rounds` to `attempts` but left two
+ * independent readers behind: main() (`reconciliation.rounds.flatMap(...)`) and the local rehearsal
+ * (scripts/rehearse-corpus-pipeline.mjs). Both threw "Cannot read properties of undefined (reading
+ * 'flatMap')" AFTER the whole generation had been acquired, so every corpus-publish run died at its
+ * last line and the rehearsal meant to catch that died at the same place. Every reader now goes
+ * through here, and a result without an `attempts` array fails by name instead of by TypeError.
+ */
+export function summarizeReconciliation(reconciliation) {
+  const attempts = reconciliation?.attempts;
+  if (!Array.isArray(attempts)) {
+    fail(`reconciliation result has no attempts array (keys: ${Object.keys(reconciliation || {}).join(', ') || 'none'}); `
+      + 'acquireSealedGeneration returns { observation, coverage, attempts, ... }');
+  }
+  const across = (field) => attempts.flatMap((attempt) => attempt?.[field] || []);
+  return {
+    attempts: attempts.length,
+    observationSha256: reconciliation.observation?.observationSha256 ?? null,
+    plan: across('plan'),
+    refreshed: across('refreshed'),
+    pruned: across('pruned'),
+    rebuilt: across('rebuilt'),
+  };
 }
 
 function defaultRun(command, args, options = {}) {
@@ -668,7 +734,8 @@ export async function reconcileAndPrepareCorpusCandidate({ assetsDir, workspaceD
   owner = 'ruvnet', builderSha, candidateDir, receiptFile, coverageFile, bootstrapIdentity = null, maxAttempts = 3,
   reconcile = (options) => acquireCorpusGeneration(options),
   normalizeUpdaters = normalizeUpdaterManifest,
-  accuracyOracleFile = null, accuracyStores = null, accuracySample = null, accuracyTimeoutMs = null,
+  accuracyOracleFile = null, accuracyStores = null, accuracySample = null, accuracySamplePerPartition = null,
+  accuracyTimeoutMs = null,
   prepare = prepareCorpusCandidate } = {}) {
   const finalized = await reconcile({ owner, assetsDir, workspaceDir, root, maxAttempts });
   // Every shipped repository store needs a complete updater entry, and a seed that predates the
@@ -680,7 +747,7 @@ export async function reconcileAndPrepareCorpusCandidate({ assetsDir, workspaceD
   const updaters = normalizeUpdaters({
     assetsDir,
     coverage: finalized.coverage,
-    refreshedStores: (finalized.attempts || []).flatMap((a) => (a.refreshed || []).map((r) => r?.store || r)).filter(Boolean),
+    refreshedStores: summarizeReconciliation(finalized).refreshed.map((r) => r?.store || r).filter(Boolean),
     seedIdentity: bootstrapIdentity,
   });
   if (updaters.missing?.length) {
@@ -691,7 +758,7 @@ export async function reconcileAndPrepareCorpusCandidate({ assetsDir, workspaceD
   const candidate = await prepare({
     root, assetsDir, builderSha, candidateDir, receiptFile, coverageFile, bootstrapIdentity,
     coverage: finalized.coverage,
-    accuracyOracleFile, accuracyStores, accuracySample, accuracyTimeoutMs,
+    accuracyOracleFile, accuracyStores, accuracySample, accuracySamplePerPartition, accuracyTimeoutMs,
   });
   return { reconciliation: finalized, updaters, candidate };
 }
@@ -707,7 +774,11 @@ export function prepareCorpusCandidate({
   coverage,
   accuracyOracleFile = null,
   accuracyStores = null,
+  // ADR-0091 D2: a whole-oracle, deterministic question sample (retrieval-accuracy.mjs
+  // --sample-questions). `accuracySamplePerPartition` is the older first-k-per-partition bound; its
+  // floor is one question per partition (196 x 2 queries, ~27 min hosted), so it cannot meet D2.
   accuracySample = null,
+  accuracySamplePerPartition = null,
   accuracyTimeoutMs = null,
   run = defaultRun,
 }) {
@@ -770,9 +841,14 @@ export function prepareCorpusCandidate({
   const bundleFile = path.join(path.dirname(candidate), `${path.basename(candidate)}.zip`);
   // ADR-086 Step 15: the benchmark runs HERE — after single-pass assembly and before the seal —
   // against the EXTRACTED final archive through the customer query path, never against `assets`.
-  // The report is written detached, beside the archive, and the seal below binds its digest. A
-  // bounded run (--stores/--sample) still writes a report, but it marks itself incomplete and the
-  // seal refuses it, so a bounded measurement can never be presented as a corpus-wide pass.
+  // The report is written detached, beside the archive, and the receipt below binds its digest.
+  // C3 is a non-blocking diagnostic (ADR-086 amendment 2026-09-15): every reader of this report
+  // (corpus-candidate.mjs, release.mjs, corpus-seed.yml) uses readDiagnosticAccuracyReport, which
+  // checks only its schema and its binding to this archive, oracle and generator -- never whether
+  // coverage is complete. So a bounded run (--stores/--sample/--sample-questions) seals exactly like
+  // a full one; it marks itself `coverage.complete: false`, and only the retained strict reader
+  // (validateAccuracyReport, the re-arm path) would refuse it. corpus-seed.yml runs a question
+  // sample (ADR-0091 D2) because the full run cost 82 minutes on a hosted runner.
   const accuracyReportFile = `${bundleFile}.accuracy.json`;
   // A stale leftover report from a prior run must never be mistaken for a fresh measurement of
   // THIS bundle -- delete it before invoking the script so only a report the script just wrote
@@ -781,7 +857,8 @@ export function prepareCorpusCandidate({
   const accuracyResult = run(process.execPath, [accuracyScript, '--bundle', bundleFile,
     '--oracle', accuracyOracle, '--out', accuracyReportFile,
     ...(accuracyStores != null ? ['--stores', String(accuracyStores)] : []),
-    ...(accuracySample != null ? ['--sample', String(accuracySample)] : []),
+    ...(accuracySample != null ? ['--sample-questions', String(accuracySample)] : []),
+    ...(accuracySamplePerPartition != null ? ['--sample', String(accuracySamplePerPartition)] : []),
     ...(accuracyTimeoutMs != null ? ['--timeout-ms', String(accuracyTimeoutMs)] : [])],
   { stdio: 'inherit' }) || {};
   // C3 was demoted to a non-blocking diagnostic on 2026-09-15 (commit a20727b7, ADR-086
@@ -833,7 +910,10 @@ function arg(argv, name, fallback = null) {
   return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback;
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// The two injectable seams exist so a test can drive main() end to end (ADR-0091 D1): nothing
+// called main() before, which is how its last line stayed broken for weeks. Production passes neither.
+export async function main(argv = process.argv.slice(2), {
+  reconcileAndPrepare = reconcileAndPrepareCorpusCandidate, stdout = process.stdout, stderr = process.stderr } = {}) {
   const root = path.resolve(arg(argv, '--root', DEFAULT_ROOT));
   const archiveFile = path.resolve(arg(argv, '--seed-archive', ''));
   const seedTag = arg(argv, '--seed-tag');
@@ -846,10 +926,14 @@ export async function main(argv = process.argv.slice(2)) {
   const builderSha = String(arg(argv, '--builder-sha', '')).toLowerCase();
   const owner = arg(argv, '--owner', 'ruvnet');
   const accuracyOracleFile = path.resolve(arg(argv, '--accuracy-oracle', path.join(root, 'data', 'retrieval-accuracy-oracle.json')));
-  // Bounded measurement is explicit and opt-in. It never yields a sealable candidate — the seal
-  // refuses an incomplete report — so these flags exist for measuring, not for shipping.
+  // Bounded measurement is explicit and opt-in; omit every flag below for the full C3 audit.
+  // `--accuracy-sample <n>` measures n oracle questions in total (both query modes), chosen
+  // deterministically -- what corpus-seed.yml passes (ADR-0091 D2). A bounded report still seals,
+  // because C3 is a diagnostic and its readers check binding, not completeness.
   const accuracyStores = arg(argv, '--accuracy-stores') ? Number(arg(argv, '--accuracy-stores')) : null;
   const accuracySample = arg(argv, '--accuracy-sample') ? Number(arg(argv, '--accuracy-sample')) : null;
+  const accuracySamplePerPartition = arg(argv, '--accuracy-sample-per-partition')
+    ? Number(arg(argv, '--accuracy-sample-per-partition')) : null;
   const accuracyTimeoutMs = arg(argv, '--accuracy-timeout-ms') ? Number(arg(argv, '--accuracy-timeout-ms')) : null;
 
   const bootstrap = assertBootstrapIdentity({ archiveFile, tag: seedTag, sha256: seedSha256, allowPinnedTag: process.argv.includes('--allow-pinned-seed-tag') });
@@ -857,19 +941,29 @@ export async function main(argv = process.argv.slice(2)) {
   fs.mkdirSync(path.dirname(assetsDir), { recursive: true });
   const extractParent = fs.mkdtempSync(path.join(path.dirname(assetsDir), '.corpus-seed-extract-'));
   await extractZip(archiveFile, extractParent);
-  normalizeExtractedCorpus({ extractedDir: extractParent, assetsDir });
+  try {
+    normalizeExtractedCorpus({ extractedDir: extractParent, assetsDir });
+  } catch (error) {
+    if (!(error instanceof SeedLedgerIncompatibleError)) throw error;
+    // Nothing was moved; leave --assets exactly as absent/empty as it was so the one bootstrap retry
+    // in corpus-seed.yml can reuse the same path. A distinct exit code, never a generic failure.
+    fs.rmSync(extractParent, { recursive: true, force: true });
+    stderr.write(`${error.message}\n[corpus-reconcile] seed ${seedTag} cannot be consumed by this runtime; `
+      + `exiting ${SEED_LEDGER_INCOMPATIBLE_EXIT} so the caller can fall back to the committed bootstrap seed\n`);
+    return SEED_LEDGER_INCOMPATIBLE_EXIT;
+  }
   const privateFence = path.join(root, 'kb', 'PRIVATE-STORES.json');
   if (!fs.existsSync(privateFence)) fail(`canonical private-store fence missing (${privateFence})`);
   fs.copyFileSync(privateFence, path.join(assetsDir, 'PRIVATE-STORES.json'), fs.constants.COPYFILE_EXCL);
   fs.rmSync(extractParent, { recursive: true, force: true });
   syncCorpusInputs({ root, assetsDir });
   const bootstrapIdentity = { tag: bootstrap.tag, sha256: bootstrap.sha256, privateFenceEvidence: seedPrivateFenceEvidence(assetsDir) };
-  const { reconciliation, candidate } = await reconcileAndPrepareCorpusCandidate({
+  const { reconciliation, candidate } = await reconcileAndPrepare({
     assetsDir, workspaceDir, root, owner, builderSha, candidateDir, receiptFile, coverageFile, bootstrapIdentity,
-    accuracyOracleFile, accuracyStores, accuracySample, accuracyTimeoutMs,
+    accuracyOracleFile, accuracyStores, accuracySample, accuracySamplePerPartition, accuracyTimeoutMs,
   });
-  const plan = reconciliation.rounds.flatMap((round) => round.plan);
-  process.stdout.write(`${JSON.stringify({ ok: true, seedTag, seedSha256, plan, reconciliation, ...candidate }, null, 2)}\n`);
+  const { plan } = summarizeReconciliation(reconciliation);
+  stdout.write(`${JSON.stringify({ ok: true, seedTag, seedSha256, plan, reconciliation, ...candidate }, null, 2)}\n`);
   return 0;
 }
 
