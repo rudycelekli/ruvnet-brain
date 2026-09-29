@@ -401,6 +401,32 @@ describe('coverage-derived retrieval canaries', () => {
 describe('independent oracle coverage inventory', () => {
   const exempt = (rows) => ({ schemaVersion: 1, kind: 'ruvnet-brain-retrieval-oracle-exemptions', exemptions: rows });
 
+  // ADR-0091 D5: a store carried at its previous bytes (STALE + a verified carry) still SHIPS, so it
+  // stays in the canary's denominator; a STALE row with no carry record does not. (The fixture-vs-
+  // available denominator for MISSING stores is D6.4's change.)
+  it('counts a carried STALE store as shipped, and a STALE store without its carry record as not', () => {
+    const { coverage, queryEvidence } = fixture();
+    const reseal = (mutate) => {
+      const next = structuredClone(coverage);
+      mutate(next.rows.find((row) => row.name === 'old-c'));
+      const byStatus = {};
+      for (const row of next.rows) byStatus[row.status] = (byStatus[row.status] || 0) + 1;
+      next.totals = { ...next.totals, byStatus };
+      next.coverageGeneration = coverageGenerationFor({ generatorSourceSha: next.generatorSourceSha, snapshotRoot: next.snapshotRoot,
+        sourceObservationSha256: next.sourceObservationSha256, rows: next.rows, enumerationReceipt: next.enumerationReceipt,
+        policyDispositionDigests: [], exemptionDigests: [] });
+      return next;
+    };
+    const stale = (row) => Object.assign(row, { status: 'STALE', upstream: { sha: 'e'.repeat(40) },
+      artifact: { ...row.artifact, sourceCommit: 'f'.repeat(40), bytesVerified: true, passagesPresent: true } });
+    const carried = reseal((row) => Object.assign(stale(row), { carry: { reason: 'qa: forge-refresh failed',
+      carriedSourceCommit: 'f'.repeat(40), missedUpstream: 'e'.repeat(40), attempts: 1, carriedCommittedAt: null } }));
+    expect(auditOracleCoverage({ coverage: carried, queryEvidence })).toMatchObject({ eligible: 6, covered: 6 });
+    const unrecorded = reseal(stale);
+    expect(() => auditOracleCoverage({ coverage: unrecorded, queryEvidence }))
+      .toThrow(/covers 1 store\(s\) outside the eligible denominator: old-c/);
+  });
+
   it('fails loudly and names every eligible store with no source-grounded row', () => {
     const { coverage, queryEvidence } = fixture();
     expect(auditOracleCoverage({ coverage, queryEvidence }))
