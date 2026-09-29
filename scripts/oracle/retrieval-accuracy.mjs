@@ -34,6 +34,14 @@
 // complete. A bounded run can therefore be read, reported and compared, but it can never seal a
 // publishable corpus receipt.
 //
+// QUESTION SAMPLING (ADR-0091 D2). `--sample-questions <n>` measures n oracle questions in total,
+// chosen by selectQuestionSample(): stratified across partitions (one question from each of n
+// partitions before any partition gets a second) and ordered by sha256(seed, id), so the same
+// seed, oracle and n always select the same questions. It exists because the full diagnostic is
+// ~1,164 queries at ~4.2 s each on a hosted runner (82 minutes), and C3 no longer blocks anything.
+// A sampled report is bounded like any other bounded run: `coverage.complete: false`, the seed and
+// the exact selected label ids recorded in `coverage.bounded.sample`. Omit the flag for the full audit.
+//
 // TIMEOUTS. The threshold text says errors and timeouts count as failures (they are never excluded
 // from the denominator), and the Step 15 proof text additionally names "timeout" as a standalone
 // blocker. Both readings are honoured, strictly: a timeout is counted as a failure in the
@@ -74,6 +82,12 @@ export const THRESHOLD_DENOMINATOR = 20;
 export const QUERY_MODES = Object.freeze(['explicit-repository', 'full-corpus']);
 export const DEFAULT_QUERY_TIMEOUT_MS = 120_000;
 export const DEFAULT_ORACLE_FILE = 'data/retrieval-accuracy-oracle.json';
+// ADR-0091 D2 — the sample the corpus pipeline measures. 80 questions x 2 modes = 160 queries. At the
+// hosted-runner cost of 4.23 s/query (82 min / 1,164 queries, the ADR's measured C3 run) that is
+// 677 s of querying, ~11.3 min, leaving ~3.7 min of the 15-minute bound for extraction and model
+// load. corpus-seed.yml passes this same number; a unit test pins the two together.
+export const C3_DIAGNOSTIC_SAMPLE_QUESTIONS = 80;
+export const DEFAULT_SAMPLE_SEED = 'c3-diagnostic-sample/1';
 
 const HEX64 = /^[a-f0-9]{64}$/;
 const HEX40 = /^[a-f0-9]{40}$/;
@@ -357,6 +371,37 @@ export function archiveStores(root) {
     .sort();
 }
 
+/**
+ * Deterministic, stratified question sample (ADR-0091 D2). Partitions are ranked by
+ * sha256(seed, partition) and each partition's labels by sha256(seed, label id); the sample takes one
+ * label from every partition in rank order, then a second from every partition that has one, and so
+ * on until `size` labels are chosen. Same seed + same oracle + same size = same labels, always.
+ * Returns the chosen labels sorted by id.
+ */
+export function selectQuestionSample({ labels, size, seed = DEFAULT_SAMPLE_SEED }) {
+  if (!Number.isSafeInteger(size) || size <= 0) fail('question sample size must be a positive integer');
+  if (typeof seed !== 'string' || !seed) fail('question sample seed must be a non-empty string');
+  const rank = (value) => sha256Of(`${seed}\u0000${value}`);
+  const byPartition = new Map();
+  for (const label of labels) {
+    if (!byPartition.has(label.partition)) byPartition.set(label.partition, []);
+    byPartition.get(label.partition).push({ label, key: rank(`label\u0000${label.id}`) });
+  }
+  const queues = [...byPartition.entries()]
+    .map(([partition, rows]) => ({ key: rank(`partition\u0000${partition}`), rows: rows.sort((a, b) => a.key.localeCompare(b.key)) }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+  const chosen = [];
+  for (let depth = 0; chosen.length < size; depth += 1) {
+    let took = false;
+    for (const queue of queues) {
+      if (chosen.length >= size) break;
+      if (depth < queue.rows.length) { chosen.push(queue.rows[depth].label); took = true; }
+    }
+    if (!took) break; // the oracle has fewer labels than requested: the sample is every label
+  }
+  return chosen.sort((a, b) => a.id.localeCompare(b.id));
+}
+
 async function defaultSearch({ dir, query, repos, timeoutMs }) {
   const module = await import('../../kb/forge-ask-all.mjs');
   let timer = null;
@@ -393,6 +438,8 @@ export async function runRetrievalAccuracy({
   outFile,
   storeLimit = null,
   sampleLimit = null,
+  sampleQuestions = null,
+  sampleSeed = DEFAULT_SAMPLE_SEED,
   modes = QUERY_MODES,
   timeoutMs = DEFAULT_QUERY_TIMEOUT_MS,
   search = defaultSearch,
@@ -407,6 +454,14 @@ export async function runRetrievalAccuracy({
   const oracle = readAccuracyOracle(oracleFile);
   const selectedModes = QUERY_MODES.filter((mode) => modes.includes(mode));
   if (!selectedModes.length) fail('no supported query mode selected');
+  if (sampleQuestions != null && (storeLimit != null || sampleLimit != null)) {
+    fail('--sample-questions is a whole-oracle sample; it cannot be combined with --stores or --sample');
+  }
+  const questionSample = sampleQuestions == null ? null
+    : selectQuestionSample({ labels: oracle.labels, size: sampleQuestions, seed: sampleSeed });
+  const sampledIds = questionSample ? new Set(questionSample.map((label) => label.id)) : null;
+  // Any sampling at all measures only what it sampled: unproduced slots are not charged and n is not N.
+  const sampling = sampleLimit != null || questionSample != null;
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'retrieval-accuracy-'));
   try {
@@ -437,7 +492,9 @@ export async function runRetrievalAccuracy({
       labelsByPartition.get(label.partition).push(label);
     }
     const orderedPartitions = [...oracle.partitions.values()].sort((a, b) => a.partition.localeCompare(b.partition));
-    const measuredPartitions = storeLimit == null ? orderedPartitions : orderedPartitions.slice(0, storeLimit);
+    const measuredPartitions = sampledIds
+      ? orderedPartitions.filter((row) => (labelsByPartition.get(row.partition) || []).some((label) => sampledIds.has(label.id)))
+      : storeLimit == null ? orderedPartitions : orderedPartitions.slice(0, storeLimit);
 
     const partitions = [];
     let timeouts = 0;
@@ -446,12 +503,13 @@ export async function runRetrievalAccuracy({
       const all = (labelsByPartition.get(partition.partition) || [])
         .slice()
         .sort((a, b) => a.id.localeCompare(b.id));
-      const selected = sampleLimit == null ? all : all.slice(0, sampleLimit);
+      const selected = sampledIds ? all.filter((label) => sampledIds.has(label.id))
+        : sampleLimit == null ? all : all.slice(0, sampleLimit);
       // THE DENOMINATOR. For a compliant oracle N comes from the unit inventory — 2 x min(100, U) —
       // never from how many labels happened to survive production. Every unproduced unit keeps its two
       // slots and scores them as misses below. A bounded --sample run is incomplete and unacceptable
       // regardless, so it measures only what it sampled.
-      const unproducedSlots = oracle.c3Eligible && sampleLimit == null ? partition.unproduced : [];
+      const unproducedSlots = oracle.c3Eligible && !sampling ? partition.unproduced : [];
       for (const mode of selectedModes) {
         const row = {
           partition: partition.partition,
@@ -466,7 +524,7 @@ export async function runRetrievalAccuracy({
           failures: 0,
           errors: 0,
           timeouts: 0,
-          sampled: sampleLimit != null && selected.length < all.length,
+          sampled: sampling && selected.length < all.length,
           oracleRows: all.length,
           failedLabels: [],
         };
@@ -514,7 +572,7 @@ export async function runRetrievalAccuracy({
         if (row.successes + row.failures !== row.n) {
           fail(`internal: partition ${row.partition} (${mode}) scored ${row.successes + row.failures} outcomes for n=${row.n}`);
         }
-        if (oracle.c3Eligible && sampleLimit == null && row.n !== row.N) {
+        if (oracle.c3Eligible && !sampling && row.n !== row.N) {
           fail(`internal: partition ${row.partition} (${mode}) measured n=${row.n} but its inventory fixes N=${row.N}`);
         }
         row.state = meetsThreshold(row.successes, row.n) && row.timeouts === 0 ? 'PASS' : 'FAIL';
@@ -533,6 +591,7 @@ export async function runRetrievalAccuracy({
     const boundedReasons = [];
     if (storeLimit != null) boundedReasons.push(`--stores ${storeLimit}`);
     if (sampleLimit != null) boundedReasons.push(`--sample ${sampleLimit}`);
+    if (questionSample) boundedReasons.push(`--sample-questions ${sampleQuestions} (seed ${sampleSeed}): ${questionSample.length} of ${oracle.labels.length} oracle questions`);
     if (selectedModes.length !== QUERY_MODES.length) boundedReasons.push(`--modes ${selectedModes.join(',')}`);
     if (unmeasuredPartitions.length) boundedReasons.push(`${unmeasuredPartitions.length} oracle partition(s) not measured`);
     if (uncoveredArchiveStores.length) boundedReasons.push(`${uncoveredArchiveStores.length} shipped store(s) with no oracle coverage`);
@@ -568,7 +627,14 @@ export async function runRetrievalAccuracy({
       queryTimeoutMs: timeoutMs,
       coverage: {
         complete,
-        bounded: complete ? null : { reasons: boundedReasons, storeLimit, sampleLimit, modes: selectedModes },
+        bounded: complete ? null : {
+          reasons: boundedReasons, storeLimit, sampleLimit, modes: selectedModes,
+          ...(questionSample ? { sample: {
+            method: 'stratified-by-partition/sha256-rank', seed: sampleSeed, requested: sampleQuestions,
+            questions: questionSample.length, oracleQuestions: oracle.labels.length,
+            labelIds: questionSample.map((label) => label.id),
+          } } : {}),
+        },
         archiveStores: shipped,
         oraclePartitions: orderedPartitions.length,
         measuredPartitions: measuredPartitions.length,
@@ -778,6 +844,8 @@ export async function main(argv = process.argv.slice(2)) {
     outFile: arg(argv, '--out'),
     storeLimit: positiveInt(arg(argv, '--stores'), '--stores'),
     sampleLimit: positiveInt(arg(argv, '--sample'), '--sample'),
+    sampleQuestions: positiveInt(arg(argv, '--sample-questions'), '--sample-questions'),
+    sampleSeed: arg(argv, '--sample-seed', DEFAULT_SAMPLE_SEED),
     modes: arg(argv, '--modes') ? String(arg(argv, '--modes')).split(',').map((mode) => mode.trim()) : QUERY_MODES,
     timeoutMs: positiveInt(arg(argv, '--timeout-ms'), '--timeout-ms') || DEFAULT_QUERY_TIMEOUT_MS,
   });
