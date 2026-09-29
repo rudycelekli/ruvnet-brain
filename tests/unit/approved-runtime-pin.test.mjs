@@ -139,22 +139,22 @@ describe('approved runtime pin — enforced equality (ADR-086 step 17)', () => {
     expect(result.failures.join('\n')).toMatch(message);
   });
 
-  it('RED (absent pin): refuses with the exact owner remediation rather than defaulting open', () => {
+  it('RED (absent pin): refuses with the exact remediation rather than defaulting open', () => {
     const dir = tmpdir();
     expect(() => readApprovedRuntime(path.join(dir, 'approved-runtime.json')))
-      .toThrow(/no approved runtime pin[\s\S]*approved-runtime\.mjs --emit/);
+      .toThrow(/no approved runtime pin[\s\S]*approved-runtime\.mjs --resolve/);
   });
 });
 
 describe('approved runtime pin — CLI round trip', () => {
-  it('emits only executables, then verifies the archive it was emitted from', () => {
+  it('emits only executables, then the CLI verifies the archive it was emitted from', () => {
+    // ADR-0091 D3: the pin is emitted in memory by `--resolve` (emitApprovedRuntime over the resolved
+    // release's own ARCHIVE-MANIFEST.json); there is no hand-run --emit CLI any more.
     const dir = tmpdir();
     const manifestFile = path.join(dir, 'ARCHIVE-MANIFEST.json');
     const pinFile = path.join(dir, 'approved-runtime.json');
     fs.writeFileSync(manifestFile, JSON.stringify(manifest(), null, 2));
-
-    execFileSync(process.execPath, [SCRIPT, '--emit', '--archive-manifest', manifestFile, '--code-sha', CODE_SHA, '--out', pinFile],
-      { encoding: 'utf8', timeout: 20_000 });
+    fs.writeFileSync(pinFile, JSON.stringify(emitApprovedRuntime({ manifest: manifest(), approvedCodeSha: CODE_SHA }), null, 2));
     const pin = JSON.parse(fs.readFileSync(pinFile, 'utf8'));
     expect(pin.files.map((entry) => entry.path)).toEqual([
       'forge-ask-all.mjs', 'forge-update.mjs', 'keys/ruvnet-brain-signing.pub.pem', 'package.json', 'verify-bundle.mjs',
@@ -164,6 +164,19 @@ describe('approved runtime pin — CLI round trip', () => {
     const pass = execFileSync(process.execPath, [SCRIPT, '--verify', '--archive-manifest', manifestFile, '--pin', pinFile],
       { encoding: 'utf8', timeout: 20_000 });
     expect(pass).toMatch(/PASS: 5 executable\/runtime file\(s\) equal v4\.3\.25 byte for byte/);
+  });
+
+  it('the retired --emit CLI and a pin-less --verify are both refused (no committed default to fall back on)', () => {
+    const dir = tmpdir();
+    const manifestFile = path.join(dir, 'ARCHIVE-MANIFEST.json');
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest(), null, 2));
+    const emit = spawnSync(process.execPath, [SCRIPT, '--emit', '--archive-manifest', manifestFile, '--code-sha', CODE_SHA],
+      { encoding: 'utf8', timeout: 20_000 });
+    expect(emit.status).toBe(2);
+    const noPin = spawnSync(process.execPath, [SCRIPT, '--verify', '--archive-manifest', manifestFile],
+      { encoding: 'utf8', timeout: 20_000, cwd: dir });
+    expect(noPin.status).toBe(1);
+    expect(noPin.stderr).toMatch(/no approved runtime pin supplied/);
   });
 
   it('exits non-zero when the archive runtime drifted from the pin', () => {
