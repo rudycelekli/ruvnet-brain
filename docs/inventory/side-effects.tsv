@@ -317,7 +317,7 @@ scripts/goldie-research.mjs	write	~/.claude/model-router/goldie/	178	main() mkdi
 scripts/goldie-research.mjs	write	~/.claude/model-router/goldie/<YYYY-MM-DD>.md	215	main() writes the weekly research brief
 scripts/route-cheap.mjs	external	agentic-flow CLI (routes task to an OpenRouter model)	165	main() spawns the local agentic-flow executable; gated on routing policy === 'auto' and a resolvable OPENROUTER_API_KEY
 scripts/route-cheap.mjs	write	~/.claude/metaharness/routing-receipts.jsonl (env override METAHARNESS_RECEIPTS)	204	main() appends a cost receipt only after a successful agentic-flow run
-scripts/approved-runtime.mjs	write	data/approved-runtime.json (or --out path)	177	main() --emit writes the approved-runtime pin file
+scripts/approved-runtime.mjs	write	--out <pin.json> (runner temp; never data/approved-runtime.json)	386	main() --resolve writes the run-time-resolved approved runtime pin (ADR-0091 D3)
 plugin/scripts/kling-preflight.sh	external	local claude CLI, --model haiku (qualitative judge)	112	runs only when the fast-path allow regexes don't already clear the prompt and $CLAUDE_BIN is executable; a failed/unparseable call fails open
 plugin/scripts/kling-preflight.sh	spawn-repo	plugin/scripts/gate-receipt.sh	144	runs only immediately before BLOCKing (MISSING non-empty), to record a gate receipt
 scripts/refresh-model-catalog.mjs	external	https://openrouter.ai/api/v1/models (GET)	89	pullLive(); unconditional on every invocation (both --check and refresh paths)

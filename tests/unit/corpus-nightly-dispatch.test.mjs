@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { detectPublisherActions } from '../../scripts/release-authority.mjs';
 
@@ -131,22 +133,170 @@ describe('corpus nightly dispatcher (ADR-086 step 18)', () => {
   });
 });
 
-describe('the dispatcher is disarmed until step 16 has shipped (ADR-086 A7 ordering)', () => {
-  it('stands down cleanly rather than dispatching before an owner-gated code release pins the runtime', () => {
+describe('the dispatcher arms only on the owner switch plus a resolved install-verified runtime (ADR-0091 D3)', () => {
+  const armedStep = () => read(DISPATCHER)
+    .split('name: Stand down unless the owner armed the nightly and an install-verified runtime resolves')[1]
+    .split('- name:')[0];
+
+  it('never reads a committed pin; it resolves the approved runtime from the signed install verification', () => {
     const source = read(DISPATCHER);
-    expect(source).toContain('if [[ -s data/approved-runtime.json ]]; then');
-    expect(source).toContain("echo 'armed=true' >> \"$GITHUB_OUTPUT\"");
-    expect(source).toContain("echo 'armed=false' >> \"$GITHUB_OUTPUT\"");
-    expect(source).toContain('corpus-nightly-dispatch is DISARMED');
-    // Every step that can reach the release rail is gated on the armed state.
-    const gated = source.match(/if: steps\.armed\.outputs\.armed == 'true'/g) || [];
-    expect(gated.length).toBeGreaterThanOrEqual(2);
+    expect(source).not.toContain('data/approved-runtime.json');
+    expect(armedStep()).toContain('node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY"');
+    // merge-base --is-ancestor needs history, so the checkout must not be shallow.
+    expect(source).toMatch(/fetch-depth: 0/);
+  });
+
+  it('the kill switch: only CORPUS_NIGHTLY == on arms it; unset or anything else stands down cleanly', () => {
+    const step = armedStep();
+    expect(step).toContain('CORPUS_NIGHTLY: ${{ vars.CORPUS_NIGHTLY }}');
+    const offBranch = step.split('if [[ "${CORPUS_NIGHTLY:-}" != on ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(offBranch).toContain("echo 'armed=false' >> \"$GITHUB_OUTPUT\"");
+    expect(offBranch).toContain('corpus-nightly-dispatch is DISARMED');
+    expect(offBranch).toContain('exit 0');
+    // The switch is checked BEFORE anything is resolved or downloaded.
+    expect(step.indexOf('!= on ]]')).toBeLessThan(step.indexOf('approved-runtime.mjs --resolve'));
+  });
+
+  // Independent review of ADR-0091 D3 (2026-09-28): NO fallback to an older release. main HEAD must BE
+  // the newest install-verified release; otherwise stand down (not yet verified) or fail (evidence bad).
+  it('never dispatches an approved runtime that is not exactly main HEAD', () => {
+    const step = executable(armedStep());
+    expect(step).toContain('if [[ "$approved_sha" != "$CANDIDATE_SHA" ]]; then');
+    expect(step).toContain('CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}');
+  });
+
+  it('distinguishes "not yet verified" (exit 3: stand down) from invalid evidence (anything else: loud)', () => {
+    const step = executable(armedStep());
+    const notYet = step.split('if [[ "$resolve_status" -eq 3 ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(notYet).toContain("echo 'armed=false'");
+    expect(notYet).toContain('exit 0');
+    const loud = step.split('if [[ "$resolve_status" -ne 0 ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(loud).toContain('::error::');
+    expect(loud).toContain('exit 1');
+    expect(step.indexOf('-eq 3 ]]')).toBeLessThan(step.indexOf('-ne 0 ]]'));
+  });
+  it('dispatches the RESOLVED identity, and every step that can reach the release rail is gated on armed', () => {
+    const source = read(DISPATCHER);
     const dispatchStep = source.split('name: Dispatch protected-release.yml on protected main in corpus mode')[1].split('- name:')[0];
     expect(dispatchStep).toContain("if: steps.armed.outputs.armed == 'true'");
-    // Disarmed is NOT a failure: a nightly red X for a correctly-disarmed scheduler trains the owner
-    // to ignore the alert that matters.
-    const armedStep = source.split('name: Stand down until an owner-gated code release has armed unattended promotion')[1].split('- id:')[0].split('- name:')[0];
-    expect(armedStep).not.toContain('exit 1');
-    expect(armedStep).not.toContain('::error::');
+    expect(dispatchStep).toContain('CANDIDATE_SHA: ${{ steps.armed.outputs.approved_sha }}');
+    expect(dispatchStep).toContain('--ref main');
+    // The run-record selector still matches the dispatched run by ITS head (main HEAD), not the corpus source.
+    const record = source.split('name: Record the target run this schedule actually created')[1].split('- name:')[0];
+    expect(record).toContain('CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}');
+    expect(dispatchStep).toContain('CANDIDATE_VERSION: ${{ steps.armed.outputs.approved_version }}');
+    const gated = source.match(/if: steps\.armed\.outputs\.armed == 'true'/g) || [];
+    expect(gated.length).toBeGreaterThanOrEqual(2);
+    expect(armedStep()).toContain("echo 'armed=true'");
+  });
+});
+
+// Behaviour, not text: execute the real `armed` step's bash with CORPUS_NIGHTLY=on, crossing the process
+// boundary. `git fetch` is stubbed (no network); everything else is real bash + real node.
+describe('the armed step, executed (independent review of ADR-0091 D3)', () => {
+  const dirs = [];
+  afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true }); });
+  const tmp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nightly-armed-')); dirs.push(dir); return dir; };
+  const HEAD_SHA = 'a'.repeat(40);
+
+  const script = () => {
+    const step = read(DISPATCHER)
+      .split('name: Stand down unless the owner armed the nightly and an install-verified runtime resolves')[1]
+      .split('- name:')[0];
+    const lines = step.split('run: |\n')[1].split('\n');
+    const indent = lines[0].match(/^ */)[0].length;
+    return lines.map((line) => line.slice(indent)).join('\n');
+  };
+
+  /** Run the step. `resolver`: { status, release } fakes approved-runtime.mjs; or { gh } runs the REAL resolver against a fake gh. */
+  function runArmed({ resolver, candidateVersion = '9.0.10' }) {
+    const dir = tmp();
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\n[ "$1" = fetch ] && exit 0\nexec ${JSON.stringify(spawnSync('which', ['git'], { encoding: 'utf8' }).stdout.trim())} "$@"\n`);
+    fs.chmodSync(path.join(bin, 'git'), 0o755);
+    if (resolver.release !== undefined || resolver.status !== undefined) {
+      fs.writeFileSync(path.join(dir, 'release.json'), JSON.stringify(resolver.release ?? {}));
+      fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
+if [ "$1" = scripts/approved-runtime.mjs ]; then cat ${JSON.stringify(path.join(dir, 'release.json'))}; exit ${resolver.status ?? 0}; fi
+exec ${JSON.stringify(process.execPath)} "$@"\n`);
+    } else {
+      fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+    }
+    fs.chmodSync(path.join(bin, 'node'), 0o755);
+    const output = path.join(dir, 'github-output');
+    fs.writeFileSync(output, '');
+    const result = spawnSync('bash', ['-c', script()], {
+      cwd: ROOT, encoding: 'utf8', timeout: 60_000,
+      env: {
+        ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        CORPUS_NIGHTLY: 'on', GITHUB_OUTPUT: output, RUNNER_TEMP: dir, GITHUB_REPOSITORY: 'stuinfla/ruvnet-brain',
+        CANDIDATE_SHA: HEAD_SHA, CANDIDATE_VERSION: candidateVersion,
+        ...(resolver.gh ? { RUVNET_GH_COMMAND: resolver.gh } : {}),
+      },
+    });
+    return { ...result, output: fs.readFileSync(output, 'utf8') };
+  }
+
+  const fakeGh = (withAggregate) => {
+    const dir = tmp();
+    const script = path.join(dir, 'gh.cjs');
+    fs.writeFileSync(script, `const fs = require('node:fs'); const path = require('node:path');
+const args = process.argv.slice(2);
+if (args[0] === 'release' && args[1] === 'list') { process.stdout.write(JSON.stringify([{ tagName: 'v9.0.10' }, { tagName: 'v9.0.2' }])); process.exit(0); }
+if (args[0] === 'api') {
+  const assets = [{ name: 'ruvnet-brain.zip' }];
+  if (${withAggregate}) assets.push({ name: 'public-verification-aggregate.json' });
+  process.stdout.write(JSON.stringify({ assets })); process.exit(0);
+}
+if (args[0] === 'release' && args[1] === 'download') {
+  fs.writeFileSync(path.join(args[args.indexOf('--dir') + 1], args[args.indexOf('--pattern') + 1]), '{"verdict":"PASS","forged":true}');
+  process.exit(0);
+}
+process.exit(9);
+`);
+    const wrapper = path.join(dir, 'gh');
+    fs.writeFileSync(wrapper, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`);
+    fs.chmodSync(wrapper, 0o755);
+    return wrapper;
+  };
+
+  it('REAL resolver, newest release has no aggregate yet -> stands down cleanly (exit 0, armed=false)', () => {
+    const result = runArmed({ resolver: { gh: fakeGh(false) } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toContain('armed=false');
+    expect(result.output).not.toContain('armed=true');
+    expect(result.stdout).toMatch(/not reached install-verified yet/);
+  });
+
+  it('REAL resolver, newest release aggregate present but invalid -> fails LOUDLY (exit 1), never an older release', () => {
+    const result = runArmed({ resolver: { gh: fakeGh(true) } });
+    expect(result.status).toBe(1);
+    expect(result.output).not.toContain('armed=true');
+    expect(result.stdout).toMatch(/::error::.*does not hold/);
+    expect(result.stderr).toMatch(/v9\.0\.10 \(the newest\)[\s\S]*refusing to fall back/);
+  });
+
+  it('newest verified release is exactly main HEAD -> armed with that identity', () => {
+    const result = runArmed({ resolver: { release: { tag: 'v9.0.10', version: '9.0.10', sourceSha: HEAD_SHA } } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toContain('armed=true');
+    expect(result.output).toContain(`approved_sha=${HEAD_SHA}`);
+  });
+
+  it('main HEAD is a newer version not yet verified -> stands down; the older verified release is NOT dispatched', () => {
+    const result = runArmed({ candidateVersion: '9.0.11',
+      resolver: { release: { tag: 'v9.0.10', version: '9.0.10', sourceSha: 'b'.repeat(40) } } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toContain('armed=false');
+    expect(result.output).not.toContain('armed=true');
+    expect(result.output).not.toContain('b'.repeat(40));
+  });
+
+  it('same version verified at a different commit than main HEAD -> loud failure', () => {
+    const result = runArmed({ resolver: { release: { tag: 'v9.0.10', version: '9.0.10', sourceSha: 'b'.repeat(40) } } });
+    expect(result.status).toBe(1);
+    expect(result.output).not.toContain('armed=true');
+    expect(result.stdout).toMatch(/::error::release v9\.0\.10 was verified at b{40}/);
   });
 });
