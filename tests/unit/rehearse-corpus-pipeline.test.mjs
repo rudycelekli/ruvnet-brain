@@ -11,9 +11,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  acquireSeed, boundObservation, createDisposableCheckout, inventoryTree, installCommandRecorder,
-  verifyExtractedBytesWithoutOriginals,
+  acquireSeed, boundObservation, frozenSeedCommits, scopeRecallFixture, createDisposableCheckout, inventoryTree, installCommandRecorder,
+  recordReconciliation, verifyExtractedBytesWithoutOriginals,
 } from '../../scripts/rehearse-corpus-pipeline.mjs';
+import { acquireSealedGeneration, summarizeReconciliation } from '../../scripts/corpus-reconcile.mjs';
 import { canonicalSourceObservation, sourceObservationDigest } from '../../scripts/source-coverage.mjs';
 
 const dirs = [];
@@ -184,6 +185,40 @@ describe('bounded observation', () => {
     expect(bounded.observationSha256).not.toBe(observation.observationSha256);
   });
 
+  it('keeps every other SEED store in scope frozen at its seed sourceCommit, so the production prune leaves it alone', () => {
+    // ADR-0091 V1: without this, only `beta` is observed, pruneIneligibleStores deletes alpha, and the
+    // repo-recall gate (one question per fixture repository) fails `rvf not found` for alpha.
+    const seedSha = 'a'.repeat(40);
+    const bounded = boundObservation({ observation, api: { canonicalSourceObservation }, repoStores: ['beta'],
+      gistCount: 2, frozenSourceCommits: { alpha: seedSha } });
+    const byName = Object.fromEntries(bounded.repositories.rows.map((row) => [row.name, row]));
+    expect(Object.keys(byName).sort()).toEqual(['alpha', 'beta']); // gamma is not in the seed: dropped
+    expect(byName.beta.defaultBranchRef.target.oid).toBe('b'.repeat(40)); // sampled: live head, rebuilt
+    expect(byName.alpha.defaultBranchRef.target.oid).toBe(seedSha); // frozen: CURRENT against the seed
+    expect(bounded.repositories.expected).toBe(2);
+    expect(bounded.observationSha256).toBe(sourceObservationDigest(bounded));
+  });
+
+  it('frozenSeedCommits reads the seed ledger, skipping aggregates and the sampled stores', () => {
+    const dir = tmp('rehearsal-ledger-');
+    fs.writeFileSync(path.join(dir, 'RVF-GENERATIONS.json'), JSON.stringify({ stores: {
+      Alpha: { sourceCommit: 'A'.repeat(40) }, beta: { sourceCommit: 'b'.repeat(40) },
+      'ruv-gists': { sourceCommit: 'c'.repeat(40) }, concepts: {}, broken: { sourceCommit: 'nope' },
+    } }));
+    expect(frozenSeedCommits(dir, ['beta'])).toEqual({ alpha: 'a'.repeat(40) });
+  });
+
+  it('scopeRecallFixture keeps in-scope questions byte for byte and names every excluded repository', () => {
+    const row = (n) => ({ query: `q${n}`, expected: { path: `src/${n}.mjs`, passageSha256: 'a'.repeat(64) } });
+    const fixture = { schemaVersion: 2, kind: 'ruvnet-brain-retrieval-query-evidence', sourceCommit: 'c'.repeat(40),
+      queries: { alpha: row(1), Beta: row(2), gamma: row(3) } };
+    const scoped = scopeRecallFixture({ fixture, inScopeStores: ['ALPHA', 'beta'] });
+    expect(scoped.fixture.queries).toEqual({ alpha: row(1), Beta: row(2) });
+    expect(scoped.fixture.kind).toBe(fixture.kind);
+    expect(scoped).toMatchObject({ kept: 2, excluded: ['gamma'] });
+    expect(() => scopeRecallFixture({ fixture, inScopeStores: ['delta'] })).toThrow(/left no questions/);
+  });
+
   it('is deterministic — two bindings of the same universe seal the same identity', () => {
     const first = boundObservation({ observation, api: { canonicalSourceObservation }, repoStores: ['alpha', 'beta'], gistCount: 3 });
     const second = boundObservation({ observation, api: { canonicalSourceObservation }, repoStores: ['alpha', 'beta'], gistCount: 3 });
@@ -260,4 +295,39 @@ describe('disposable checkout', () => {
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: checkout.root, encoding: 'utf8' });
     expect(String(head.stdout).trim()).toBe(checkout.head);
   }, 120_000);
+});
+
+// ADR-0091 D1. The rehearsal kept its own copy of `reconciliation.rounds.flatMap(...)` after cd0f032f
+// renamed the history to `attempts`, so the tool meant to catch main()'s crash crashed in the same place.
+describe('reconciliation record (ADR-0091 D1)', () => {
+  it('records the history the REAL sealed-generation loop produces, through the shared reader', async () => {
+    const ledger = { stores: {} };
+    const row = () => ({ key: 'repo:alpha', kind: 'repository', name: 'alpha', url: 'https://github.com/ruvnet/alpha',
+      disposition: 'eligible', upstream: { sha: 'a'.repeat(40) }, artifact: { store: 'alpha' },
+      status: ledger.stores.alpha ? 'CURRENT' : 'STALE' });
+    const reconciliation = await acquireSealedGeneration({
+      maxAttempts: 2,
+      observe: async () => ({ observationSha256: 'b'.repeat(64) }),
+      build: async () => ({ schemaVersion: 1, coverageGeneration: 'g1', rows: [row()] }),
+      readLedger: () => ledger,
+      execute: async (plan) => {
+        for (const entry of plan) ledger.stores[entry.store] = { sourceCommit: entry.upstreamSha };
+        return { refreshed: plan.map((entry) => entry.store) };
+      },
+      prune: async () => ({ pruned: ['retired-store'] }),
+      rebuild: async () => ({ rebuilt: ['concepts', 'ruv-gists'] }),
+    });
+    expect(recordReconciliation({ summarize: summarizeReconciliation, reconciliation, durationMs: 7 })).toEqual({
+      attempts: 1, observationSha256: 'b'.repeat(64), refreshed: ['alpha'], pruned: 1,
+      rebuilt: ['concepts', 'ruv-gists'], durationMs: 7,
+    });
+  });
+
+  it('holds no private reader of the history, and passes the attempt bound the orchestrator actually reads', () => {
+    const source = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname),
+      '..', '..', 'scripts', 'rehearse-corpus-pipeline.mjs'), 'utf8');
+    expect(source).not.toMatch(/reconciliation\.(rounds|attempts)\b/);
+    expect(source).toMatch(/summarizeReconciliation: reconcileMod\.summarizeReconciliation/);
+    expect(source).toMatch(/maxAttempts: bounds\.maxRounds/);
+  });
 });

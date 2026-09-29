@@ -14,25 +14,41 @@
 // "Pinning survives only through enforced equality to the approved shipped runtime and its
 // executable hashes. Copying current-main package.json or preserving a version string alone is
 // insufficient." So this compares every executable/runtime file's sha256 AND byte length against a
-// committed inventory produced from the owner-approved shipped code artifact — and, in the other
+// inventory produced from the owner-approved shipped code artifact — and, in the other
 // direction, refuses any executable-shaped file in the archive that the inventory does not cover, so
 // a NEW unpinned executable cannot ride along.
 //
-// builderSourceSha stays independent on purpose: the corpus content may be built from a newer main
-// than the approved runtime. That is the whole point of separating the two identities.
+// builderSourceSha stays a separately-bound identity in the corpus receipt. Under ADR-0091 D3 the
+// corpus is built at the approved release's own sourceSha, so the two are equal by construction.
+//
+// WHERE THE PIN COMES FROM (ADR-0091 D3, 2026-09-28). It used to be a committed file,
+// data/approved-runtime.json, emitted by hand after a code release reached `install-verified`. That
+// could never stay valid: under "every main commit is a release", the commit carrying a pin for
+// release X is itself release X+1, whose archive then fails the pin for X. The committed file is gone
+// for good. The pin is now RESOLVED AT RUN TIME from evidence GitHub already holds: the newest code
+// release whose signed public-verification-aggregate.json verifies against the committed
+// keys/ruvnet-brain-signing.pub.pem (verdict PASS over the 3-OS x 3-host install matrix), whose
+// identity.bundleSha256 is the exact ruvnet-brain.zip on that release, and whose identity.sourceSha
+// is reachable from origin/main. The pin is emitted from THAT zip's own ARCHIVE-MANIFEST.json, and the
+// corpus is built at identity.sourceSha, so runtime equality holds by construction. It is still
+// enforced byte for byte, both directions, by the unchanged verifyApprovedRuntime.
 //
 // Usage:
-//   node scripts/approved-runtime.mjs --emit   --archive-manifest <ARCHIVE-MANIFEST.json> \
-//        --code-sha <40hex> --out data/approved-runtime.json      # owner, during a code release
+//   node scripts/approved-runtime.mjs --resolve --repo owner/name [--tag vX.Y.Z] [--main-ref origin/main] \
+//        --out <pin.json>                          # resolve (newest ONLY, or exactly --tag) and write the pin
+//                                                  # exit 3 = newest release not yet install-verified
+//                                                  # exit 1 = evidence present but invalid (loud)
 //   node scripts/approved-runtime.mjs --verify --archive-manifest <ARCHIVE-MANIFEST.json> \
-//        [--pin data/approved-runtime.json]                        # every corpus promotion
+//        --pin <pin.json>                          # every corpus promotion
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const APPROVED_RUNTIME_FILE = 'data/approved-runtime.json';
 export const APPROVED_RUNTIME_KIND = 'ruvnet-brain-approved-runtime';
 
 // Executable/runtime surface. Extensions cover every interpretable artifact; the three exact
@@ -127,11 +143,13 @@ export function verifyApprovedRuntime({ manifest, pin } = {}) {
 }
 
 export function readApprovedRuntime(pinFile) {
-  const resolved = path.resolve(pinFile || path.join(ROOT, APPROVED_RUNTIME_FILE));
+  // No committed default (ADR-0091 D3): a pin is only ever this run's own --resolve output.
+  const remedy = 'node scripts/approved-runtime.mjs --resolve --repo <owner/name> --out <pin.json>';
+  if (!pinFile) throw new Error(`no approved runtime pin supplied; resolve one from the newest install-verified code release: ${remedy}`);
+  const resolved = path.resolve(pinFile);
   if (!fs.existsSync(resolved)) {
-    throw new Error(`no approved runtime pin at ${resolved}. Unattended corpus promotion is refused until an `
-      + `owner-gated code release emits it: node scripts/approved-runtime.mjs --emit --archive-manifest `
-      + `<ARCHIVE-MANIFEST.json> --code-sha <sha> --out ${APPROVED_RUNTIME_FILE}`);
+    throw new Error(`no approved runtime pin at ${resolved}. Unattended corpus promotion is refused until one is `
+      + `resolved from an install-verified code release: ${remedy}`);
   }
   return JSON.parse(fs.readFileSync(resolved, 'utf8'));
 }
@@ -156,29 +174,232 @@ export function emitApprovedRuntime({ manifest, approvedCodeSha } = {}) {
   };
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Run-time resolution (ADR-0091 D3)
+// ---------------------------------------------------------------------------------------------
+
+export const AGGREGATE_ASSET = 'public-verification-aggregate.json';
+export const ARCHIVE_ASSET = 'ruvnet-brain.zip';
+export const SIGNING_PUBLIC_KEY_FILE = 'keys/ruvnet-brain-signing.pub.pem';
+const CODE_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+
+const semverDescending = (left, right) => {
+  const a = CODE_TAG.exec(left).slice(1).map(Number);
+  const b = CODE_TAG.exec(right).slice(1).map(Number);
+  return b[0] - a[0] || b[1] - a[1] || b[2] - a[2];
+};
+
+function defaultGh(args) {
+  const result = spawnSync(process.env.RUVNET_GH_COMMAND || 'gh', args,
+    { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 15 * 60_000 });
+  if (result.error || result.status !== 0) {
+    throw new Error(`gh ${args.slice(0, 3).join(' ')} failed: ${String(result.error?.message || result.stderr || `exit ${result.status}`).trim().slice(0, 400)}`);
+  }
+  return result.stdout;
+}
+
+function defaultGit(args, { cwd = ROOT } = {}) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  return { status: result.status, stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
+}
+
+function sha256File(file) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(8 * 1024 * 1024);
+    let read;
+    while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read));
+  } finally { fs.closeSync(fd); }
+  return hash.digest('hex');
+}
+
+/** Read the ONE ARCHIVE-MANIFEST.json out of a release zip without extracting 500 MB of corpus. */
+export function readArchiveManifestFromZip(zipFile) {
+  const listing = spawnSync('unzip', ['-Z1', zipFile], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (listing.status !== 0) throw new Error(`cannot list ${path.basename(zipFile)}: ${String(listing.stderr).trim().slice(0, 200)}`);
+  const entries = listing.stdout.split('\n').filter((entry) => /(^|\/)ARCHIVE-MANIFEST\.json$/.test(entry));
+  if (entries.length !== 1) throw new Error(`${path.basename(zipFile)} carries ${entries.length} ARCHIVE-MANIFEST.json entries, expected exactly 1`);
+  const body = spawnSync('unzip', ['-p', zipFile, entries[0]], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  if (body.status !== 0) throw new Error(`cannot read ${entries[0]}: ${String(body.stderr).trim().slice(0, 200)}`);
+  return JSON.parse(body.stdout);
+}
+
+/**
+ * The newest code release exists but carries NO public-verification aggregate yet: install
+ * verification has not finished (or never ran). That is "not yet verified", not a fault — the nightly
+ * stands down cleanly on it. It is the ONLY resolution failure that is not loud.
+ */
+export class ApprovedRuntimeNotYetVerified extends Error {
+  constructor(tag, message) {
+    super(message);
+    this.name = 'ApprovedRuntimeNotYetVerified';
+    this.code = 'APPROVED_RUNTIME_NOT_YET_VERIFIED';
+    this.tag = tag;
+  }
+}
+/** CLI exit code for ApprovedRuntimeNotYetVerified; every other resolution failure exits 1. */
+export const EXIT_NOT_YET_VERIFIED = 3;
+
+/**
+ * Judge ONE code release. Returns the resolution, or throws a reason that names exactly which piece of
+ * evidence is missing or wrong. Order is cheapest-first: the 1 MB signed aggregate and git ancestry are
+ * checked before the ~555 MB archive is downloaded at all.
+ */
+function judgeCodeRelease({ repo, tag, gh, git, mainRef, publicKey, verifyAggregate, downloadAsset, readArchiveManifest, scratch }) {
+  const release = JSON.parse(gh(['api', `repos/${repo}/releases/tags/${tag}`]));
+  if (release.draft || release.prerelease) throw new Error('release is a draft or prerelease');
+  const assets = new Map((release.assets || []).map((asset) => [asset.name, asset]));
+  if (!assets.has(AGGREGATE_ASSET)) {
+    throw new ApprovedRuntimeNotYetVerified(tag, `code release ${tag} has no ${AGGREGATE_ASSET} yet — `
+      + 'it has not reached install-verified, so there is no approved runtime to build at');
+  }
+  if (!assets.has(ARCHIVE_ASSET)) throw new Error(`no ${ARCHIVE_ASSET} asset`);
+
+  const aggregateFile = downloadAsset({ repo, tag, name: AGGREGATE_ASSET, dir: scratch });
+  let aggregate;
+  try { aggregate = JSON.parse(fs.readFileSync(aggregateFile, 'utf8')); }
+  catch (error) { throw new Error(`${AGGREGATE_ASSET} is not JSON (${error.message})`); }
+  // Signature over canonical JSON with the COMMITTED trust root, digest, and a full rebuild of the
+  // aggregate from its nine raw leaves — the same verifier the release finalizer uses.
+  verifyAggregate(aggregate, publicKey);
+  const identity = aggregate.identity || {};
+  if (aggregate.verdict !== 'PASS') throw new Error(`aggregate verdict is ${aggregate.verdict}, not PASS`);
+  if (identity.tag !== tag || identity.version !== tag.slice(1)) {
+    throw new Error(`aggregate identity ${identity.tag}/${identity.version} does not describe release ${tag}`);
+  }
+  const sourceSha = String(identity.sourceSha || '').toLowerCase();
+  const bundleSha256 = String(identity.bundleSha256 || '').toLowerCase();
+  if (!HEX40.test(sourceSha) || !HEX64.test(bundleSha256)) throw new Error('aggregate identity sourceSha/bundleSha256 malformed');
+
+  const apiDigest = String(assets.get(ARCHIVE_ASSET).digest || '');
+  if (apiDigest && apiDigest !== `sha256:${bundleSha256}`) {
+    throw new Error(`${ARCHIVE_ASSET} on ${tag} (${apiDigest}) is not the archive the aggregate verified (sha256:${bundleSha256})`);
+  }
+  const ancestry = git(['merge-base', '--is-ancestor', sourceSha, mainRef]);
+  if (ancestry.status === 1) throw new Error(`aggregate sourceSha ${sourceSha} is not reachable from ${mainRef}`);
+  if (ancestry.status !== 0) {
+    throw new Error(`aggregate sourceSha ${sourceSha} cannot be checked against ${mainRef} (${ancestry.stderr.trim().slice(0, 200) || `exit ${ancestry.status}`}); is the clone complete?`);
+  }
+  // The corpus is built AT sourceSha, and build-bundle.mjs stamps the archive with package.json's
+  // version there. Prove that equals the approved release, or the pin could never match the build.
+  const pkg = git(['show', `${sourceSha}:package.json`]);
+  let pkgVersion = null;
+  try { pkgVersion = JSON.parse(pkg.stdout).version; } catch { /* reported below */ }
+  if (pkg.status !== 0 || pkgVersion !== identity.version) {
+    throw new Error(`package.json at ${sourceSha.slice(0, 12)} is ${pkgVersion ?? 'unreadable'}, not ${identity.version}`);
+  }
+
+  const zipFile = downloadAsset({ repo, tag, name: ARCHIVE_ASSET, dir: scratch });
+  const actual = sha256File(zipFile);
+  if (actual !== bundleSha256) throw new Error(`downloaded ${ARCHIVE_ASSET} is ${actual}, not the verified ${bundleSha256}`);
+  const manifest = readArchiveManifest(zipFile);
+  if (manifest.version !== identity.version || manifest.releaseTag !== tag) {
+    throw new Error(`archive manifest is ${manifest.releaseTag}, not ${tag}`);
+  }
+  const pin = emitApprovedRuntime({ manifest, approvedCodeSha: sourceSha });
+  return {
+    pin,
+    release: { tag, version: identity.version, sourceSha, bundleSha256, aggregateSha256: aggregate.aggregateSha256 },
+  };
+}
+
+/**
+ * Resolve the approved runtime pin from the NEWEST published code release (or exactly `tag`).
+ *
+ * NO FALLBACK (independent review of ADR-0091 D3, 2026-09-28). The newest vX.Y.Z must itself carry a
+ * PASS aggregate. It never walks back to an older release: an older runtime promoted as the corpus
+ * `releases/latest` over a newer live code release breaks fresh installs (version mismatch) and is
+ * refused by already-updated clients as incompatible — a self-inflicted outage, and a deliberate
+ * downgrade path for anyone able to withhold or corrupt the newest aggregate. So:
+ *   - newest release has NO aggregate asset  -> throws ApprovedRuntimeNotYetVerified (clean stand-down)
+ *   - newest release has an aggregate that does not verify, is not PASS, or any other evidence fails
+ *                                             -> throws a plain Error (loud failure; never skipped)
+ */
+export async function resolveApprovedRuntime({
+  repo, tag = null, mainRef = 'origin/main', root = ROOT,
+  gh = defaultGh, git = (args) => defaultGit(args, { cwd: root }),
+  publicKey = null,
+  // Loaded lazily: bin/install.mjs reaches this module (via installed-brain-health.mjs ->
+  // isRuntimeFile) on every customer install, and must not drag the release-verification graph in.
+  verifyAggregate = null,
+  downloadAsset = ({ repo: slug, tag: releaseTag, name, dir }) => {
+    gh(['release', 'download', releaseTag, '--repo', slug, '--pattern', name, '--dir', dir, '--clobber']);
+    return path.join(dir, name);
+  },
+  readArchiveManifest = readArchiveManifestFromZip,
+  scratchDir = null,
+} = {}) {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(String(repo || ''))) throw new Error('--repo must be owner/name');
+  if (tag !== null && !CODE_TAG.test(String(tag))) throw new Error('--tag must be vX.Y.Z');
+  const key = publicKey || crypto.createPublicKey(fs.readFileSync(path.join(root, SIGNING_PUBLIC_KEY_FILE), 'utf8'));
+  const verify = verifyAggregate
+    || (await import('./public-verification-aggregate.mjs')).verifyPublicVerificationAggregate;
+
+  let candidate = tag;
+  if (!candidate) {
+    const listed = JSON.parse(gh(['release', 'list', '--repo', repo, '--limit', '200',
+      '--json', 'tagName,isDraft,isPrerelease']) || '[]');
+    [candidate] = listed.filter((row) => !row.isDraft && !row.isPrerelease && CODE_TAG.test(String(row.tagName || '')))
+      .map((row) => row.tagName).sort(semverDescending);
+  }
+  if (!candidate) throw new Error(`no code releases (vX.Y.Z) listed on ${repo}`);
+
+  const scratch = scratchDir || fs.mkdtempSync(path.join(os.tmpdir(), 'approved-runtime-resolve-'));
+  const dir = path.join(scratch, candidate);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    return judgeCodeRelease({ repo, tag: candidate, gh, git, mainRef, publicKey: key,
+      verifyAggregate: verify, downloadAsset, readArchiveManifest, scratch: dir });
+  } catch (error) {
+    if (error instanceof ApprovedRuntimeNotYetVerified) throw error;
+    throw new Error(`code release ${candidate}${tag ? '' : ' (the newest)'} carries install-verification evidence that does not hold `
+      + `(refusing it, and refusing to fall back to an older release): ${error.message}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (!scratchDir) fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 const arg = (name, fallback) => {
   const index = process.argv.indexOf(name);
   return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
 };
 
-function main() {
-  const manifestFile = arg('--archive-manifest');
-  if (!manifestFile) { console.error('usage: approved-runtime.mjs --emit|--verify --archive-manifest <file> [...]'); return 2; }
-  let manifest;
-  try { manifest = JSON.parse(fs.readFileSync(path.resolve(manifestFile), 'utf8')); }
-  catch (error) { console.error(`[approved-runtime] cannot read archive manifest: ${error.message}`); return 1; }
-
-  if (process.argv.includes('--emit')) {
-    let pin;
-    try { pin = emitApprovedRuntime({ manifest, approvedCodeSha: arg('--code-sha') }); }
-    catch (error) { console.error(`[approved-runtime] ${error.message}`); return 1; }
-    const out = path.resolve(arg('--out', path.join(ROOT, APPROVED_RUNTIME_FILE)));
-    fs.mkdirSync(path.dirname(out), { recursive: true });
-    fs.writeFileSync(out, `${JSON.stringify(pin, null, 2)}\n`);
-    console.log(`[approved-runtime] pinned ${pin.fileCount} executable/runtime file(s) at ${pin.releaseTag} → ${path.relative(ROOT, out)}`);
+async function main() {
+  if (process.argv.includes('--resolve')) {
+    let result;
+    try {
+      result = await resolveApprovedRuntime({
+        repo: arg('--repo', process.env.GITHUB_REPOSITORY),
+        tag: arg('--tag', null),
+        mainRef: arg('--main-ref', 'origin/main'),
+      });
+    } catch (error) {
+      console.error(`[approved-runtime] ${error.message}`);
+      return error instanceof ApprovedRuntimeNotYetVerified ? EXIT_NOT_YET_VERIFIED : 1;
+    }
+    const out = arg('--out');
+    if (out) {
+      fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+      fs.writeFileSync(path.resolve(out), `${JSON.stringify(result.pin, null, 2)}\n`);
+    }
+    process.stdout.write(`${JSON.stringify({ ...result.release, fileCount: result.pin.fileCount })}\n`);
+    console.error(`[approved-runtime] resolved ${result.release.tag} @ ${result.release.sourceSha} `
+      + `(${result.pin.fileCount} executable/runtime file(s) pinned from its own archive)`);
     return 0;
   }
 
+  const manifestFile = arg('--archive-manifest');
+  if (!process.argv.includes('--verify') || !manifestFile) {
+    console.error('usage: approved-runtime.mjs --resolve --repo <owner/name> [--tag vX.Y.Z] [--main-ref <ref>] --out <pin.json>\n'
+      + '       approved-runtime.mjs --verify --archive-manifest <file> --pin <pin.json>');
+    return 2;
+  }
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(path.resolve(manifestFile), 'utf8')); }
+  catch (error) { console.error(`[approved-runtime] cannot read archive manifest: ${error.message}`); return 1; }
   let pin;
   try { pin = readApprovedRuntime(arg('--pin')); }
   catch (error) { console.error(`[approved-runtime] ${error.message}`); return 1; }
@@ -193,5 +414,5 @@ function main() {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  process.exitCode = main();
+  main().then((code) => { process.exitCode = code; });
 }
