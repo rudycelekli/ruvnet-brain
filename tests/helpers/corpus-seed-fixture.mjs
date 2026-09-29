@@ -338,3 +338,68 @@ export function fixtureReleaseRoot(root, { oracleBody = null } = {}) {
     generatorSha256: sha256(path.join(repoRoot, 'scripts/oracle/retrieval-accuracy.mjs')),
   };
 }
+
+/**
+ * ADR-0091 D6.2: the generation's sealed coverage, bound store by store to `receipt` (the fixture's
+ * one repository store, alpha). `carried: true` records alpha as STALE + carry -- a degraded
+ * generation the publisher must refuse while ADR-0091 D10 records no soaked validator transition.
+ */
+export async function writeCoverageFor(receipt, file, { carried = false, rvfSha256 = null, extraRows = [] } = {}) {
+  const { coverageGenerationFor, digest } = await import('../../scripts/coverage-integrity.mjs');
+  const alpha = receipt.stores.find((store) => store.name === 'alpha');
+  const rvf = alpha.files.find((entry) => entry.file === 'alpha.big.rvf');
+  const missed = 'e'.repeat(40);
+  const row = {
+    key: 'repo:1', kind: 'repository', name: 'alpha', url: 'https://github.com/ruvnet/alpha',
+    disposition: 'eligible', reasons: [],
+    upstream: { sha: carried ? missed : alpha.sourceCommit, committedAt: '2026-08-21T00:00:00Z' },
+    artifact: { store: 'alpha', sourceCommit: alpha.sourceCommit, rvfSha256: rvfSha256 || rvf.sha256,
+      bytesVerified: true, passagesPresent: true },
+    status: carried ? 'STALE' : 'CURRENT',
+    ...(carried ? { carry: { reason: 'qa: forge-refresh failed', carriedSourceCommit: alpha.sourceCommit,
+      missedUpstream: missed, attempts: 1, carriedCommittedAt: null } } : {}),
+  };
+  // `extraRows` (ADR-0091 D7): further repository rows -- e.g. an INELIGIBLE row, which gives a fixture
+  // repository a row (so it is NOT retired) without shipping a store the receipt would have to bind.
+  const rows = [row, ...extraRows];
+  const byStatus = {};
+  for (const entry of rows) byStatus[entry.status] = (byStatus[entry.status] || 0) + 1;
+  const enumerationReceipt = { schemaVersion: 1, owner: 'ruvnet', observedAt: '2026-08-22T00:00:00Z',
+    requestParameters: {}, repositories: { expected: rows.length, pages: [] }, gists: { expected: 0, pages: [] },
+    duplicateKeys: 0, terminal: true };
+  const base = { schemaVersion: 1, kind: 'ruvnet-brain-corpus-coverage', owner: 'ruvnet',
+    observedAt: '2026-08-22T00:00:00Z', generatorSourceSha: digest('generator'),
+    sourceObservationSha256: digest('observation'), snapshotRoot: digest('snapshot'),
+    policy: { policyDispositionDigests: [], exemptionDigests: [] }, enumerationReceipt, rows,
+    totals: { repositories: rows.length, gists: 0, rows: rows.length, byStatus } };
+  const coverage = { ...base, coverageGeneration: coverageGenerationFor({ generatorSourceSha: base.generatorSourceSha,
+    snapshotRoot: base.snapshotRoot, sourceObservationSha256: base.sourceObservationSha256, rows,
+    enumerationReceipt, policyDispositionDigests: [], exemptionDigests: [] }) };
+  fs.writeFileSync(file, `${JSON.stringify(coverage, null, 2)}\n`);
+  return coverage;
+}
+
+/** An INELIGIBLE repository row for `store`: the repository exists (so it is not retired), ships nothing. */
+export function ineligibleRepositoryRow(store, key = `repo:ineligible/${store}`) {
+  return { key, kind: 'repository', name: store, url: `https://github.com/ruvnet/${store}`,
+    disposition: 'fork:no-original-content', reasons: ['fixture: a fork with no original content'],
+    upstream: { sha: 'd'.repeat(40), committedAt: null }, artifact: { store, sourceCommit: null, rvfSha256: null },
+    status: 'INELIGIBLE' };
+}
+
+/**
+ * ADR-0091 D7: rewrite a detached repo-recall report so it CLAIMS `stores` retired against the coverage
+ * in `coverageFile` -- rows marked, retirement block written, totals re-derived by the real tally. Whether
+ * the claim is TRUE is exactly what a reader must decide from the coverage on its own.
+ */
+export function retireInRecallReport(reportFile, stores, coverageFile) {
+  const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
+  const retired = new Set(stores.map((store) => store.toLowerCase()));
+  report.rows = report.rows.map((row) => (retired.has(row.store.toLowerCase())
+    ? { store: row.store, expectedPath: row.expectedPath, retired: true, repoCovered: false, exactFileRank: null, returnedPaths: [] }
+    : row));
+  report.retirement = { coverageSha256: sha256(coverageFile), stores: [...retired].sort() };
+  report.totals = tally(report.rows);
+  fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`);
+  return report;
+}

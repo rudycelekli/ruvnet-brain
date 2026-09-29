@@ -43,9 +43,16 @@
 // re-checks sha256 and byte length before reconciliation, corpus-reconcile.mjs checks the ledger
 // schema after extraction, and corpus-candidate.mjs re-derives the whole candidate from the bytes).
 //
+// ADR-0091 D6: --require-coverage is the CODE-RELEASE mode (ci.yml's release-qe and warm-brain jobs,
+// and release.mjs's publish-time re-check). A code release assembles single-pass from the
+// generation's sealed coverage, so a generation that did not publish its coverage sidecar
+// (CORPUS-COVERAGE.json + coverage-receipt.json, D6.2) -- every generation published before D6 --
+// is skipped as incompatible FOR THAT PURPOSE, with its reason. It remains a valid nightly seed:
+// without the flag nothing about the nightly's selection changes.
+//
 // Usage:
 //   node scripts/corpus-next-seed.mjs --repo owner/name [--runtime-root <source tree>]
-//                                     [--bootstrap data/corpus-seed.json] [--out <file>]
+//                                     [--bootstrap data/corpus-seed.json] [--require-coverage] [--out <file>]
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -53,6 +60,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { COVERAGE_ASSET, COVERAGE_RECEIPT_ASSET, bindCoverageToReceipt, verifyCoverageSidecar } from './corpus-coverage-sidecar.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -110,11 +118,13 @@ export async function loadCompatibilityProfile({ runtimeRoot = ROOT, fixtureFile
     throw new Error(`${root} has no repo-recall reader to judge a seed with`);
   }
   const { model, dimensions } = parseBuildFingerprint(forge.FORGE_BUILD_FINGERPRINT);
+  const fixture = recall.loadFixture(fixtureFile || path.join(root, recall.DEFAULT_FIXTURE_FILE));
   return {
     runtimeRoot: root,
     model,
     dimensions,
-    fixtureSha256: recall.loadFixture(fixtureFile || path.join(root, recall.DEFAULT_FIXTURE_FILE)).fixtureSha256,
+    fixtureSha256: fixture.fixtureSha256,
+    fixtureStores: fixture.questions.map((question) => question.store),
     floorValue: recall.ABSOLUTE_FLOOR,
     readRecallReport: recall.readRecallReport,
   };
@@ -135,13 +145,18 @@ const sha256Of = (file) => crypto.createHash('sha256').update(fs.readFileSync(fi
  * recorded on `rejected` so a no-op night is explainable rather than silent. Never downloads the
  * archive: every check below reads the release's asset list, its receipt, or its recall report.
  */
-function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
-  const reject = (reason) => { rejected.push({ tag, reason }); return null; };
+function judgeRelease({ run, repo, tag, digest, profile, rejected, requireCoverage = false }) {
+  // `indeterminate` marks a rejection that says nothing about the release itself -- the network or
+  // `gh` failed. A publish-time re-check (ADR-0091 D6.6) must not read one as "no newer generation".
+  const reject = (reason, { indeterminate = false } = {}) => {
+    rejected.push({ tag, reason, ...(indeterminate ? { indeterminate: true } : {}) });
+    return null;
+  };
   let view;
   try {
     view = ghJson(run, ['release', 'view', tag, '--repo', repo, '--json', 'tagName,isDraft,assets']);
   } catch (error) {
-    return reject(`release view failed (${error.message})`);
+    return reject(`release view failed (${error.message})`, { indeterminate: true });
   }
   if (view?.tagName !== tag || view.isDraft) return reject('release is a draft or names another tag');
   const assets = Array.isArray(view.assets) ? view.assets : [];
@@ -149,13 +164,17 @@ function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
   for (const name of REQUIRED_ASSETS) {
     if (named(name).length !== 1) return reject(`unverified: expected exactly one ${name} asset`);
   }
+  if (requireCoverage && [COVERAGE_ASSET, COVERAGE_RECEIPT_ASSET].some((name) => named(name).length !== 1)) {
+    return reject(`incompatible for a code release: no coverage sidecar (${COVERAGE_ASSET} + ${COVERAGE_RECEIPT_ASSET}; `
+      + 'published before ADR-0091 D6.2)');
+  }
   const archive = named(ARCHIVE_ASSET)[0];
   if (!Number.isSafeInteger(archive.size) || archive.size < 1) return reject('unverified: archive asset has no usable byte length');
 
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'corpus-next-seed-'));
   try {
     const receiptFile = download(run, { repo, tag, pattern: RECEIPT_ASSET, dir: scratch });
-    if (!receiptFile) return reject('unverified: corpus receipt could not be downloaded');
+    if (!receiptFile) return reject('unverified: corpus receipt could not be downloaded', { indeterminate: true });
     let receipt;
     try { receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); }
     catch (error) { return reject(`unverified: corpus receipt unreadable (${error.message})`); }
@@ -192,16 +211,47 @@ function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
     // D4 check 2 -- the recall report, the one small file that decides whether the downstream seed
     // re-check can pass. Downloaded only now, after the receipt already qualified.
     const recallFile = download(run, { repo, tag, pattern: RECALL_ASSET, dir: scratch });
-    if (!recallFile) return reject('unverified: repo-recall report could not be downloaded');
+    if (!recallFile) return reject('unverified: repo-recall report could not be downloaded', { indeterminate: true });
     if (sha256Of(recallFile) !== receipt.recallReport.sha256 || fs.statSync(recallFile).size !== receipt.recallReport.bytes) {
       return reject('unverified: repo-recall report is not the one the receipt binds');
     }
-    let claimedFixture = null;
-    try { claimedFixture = JSON.parse(fs.readFileSync(recallFile, 'utf8'))?.fixture?.sha256 ?? null; } catch { /* the reader names it below */ }
+    let claimed = null;
+    try { claimed = JSON.parse(fs.readFileSync(recallFile, 'utf8')); } catch { /* the reader names it below */ }
+    const claimedFixture = claimed?.fixture?.sha256 ?? null;
     if (claimedFixture !== profile.fixtureSha256) {
       return reject(`incompatible: recall report was measured against fixture ${String(claimedFixture).slice(0, 12)}, `
         + `this runtime's frozen fixture is ${profile.fixtureSha256.slice(0, 12)}`);
     }
+    // ADR-0091 D7.3: a report that claims retired questions is verified against the generation's own
+    // sealed coverage (its D6.2 sidecar), recomputed by the reader -- in the nightly mode too, or one
+    // retirement would push every night onto the bootstrap. No sidecar means the claim is unverifiable,
+    // and the generation is skipped.
+    const claimsRetirement = claimed?.retirement !== undefined;
+    if (claimsRetirement && !requireCoverage && [COVERAGE_ASSET, COVERAGE_RECEIPT_ASSET].some((name) => named(name).length !== 1)) {
+      return reject('incompatible: recall report claims retired question(s) but the generation published no coverage sidecar '
+        + `(${COVERAGE_ASSET} + ${COVERAGE_RECEIPT_ASSET}) to verify them against`);
+    }
+
+    // D6.2 -- the code-release mode's extra check, from two more small files: the sidecar must name
+    // THIS generation, bind THESE coverage bytes, and the coverage must describe this receipt's stores.
+    let coverage = null;
+    let coverageBytes = null;
+    if (requireCoverage || claimsRetirement) {
+      const sidecarFile = download(run, { repo, tag, pattern: COVERAGE_RECEIPT_ASSET, dir: scratch });
+      const coverageFile = sidecarFile && download(run, { repo, tag, pattern: COVERAGE_ASSET, dir: scratch });
+      if (!sidecarFile || !coverageFile) return reject('unverified: coverage sidecar could not be downloaded', { indeterminate: true });
+      try {
+        coverageBytes = fs.readFileSync(coverageFile);
+        const verified = verifyCoverageSidecar({ sidecar: JSON.parse(fs.readFileSync(sidecarFile, 'utf8')), coverageBytes,
+          generationTag: tag, archiveSha256: digest, archiveBytes: archive.size });
+        bindCoverageToReceipt({ coverage: verified.coverage, receipt });
+        coverage = { asset: COVERAGE_ASSET, sha256: sha256Of(coverageFile), bytes: coverageBytes.length,
+          receiptAsset: COVERAGE_RECEIPT_ASSET, receiptSha256: sha256Of(sidecarFile), degraded: verified.degraded };
+      } catch (error) {
+        return reject(`unverified: coverage sidecar does not bind this generation (${error.message})`);
+      }
+    }
+
     try {
       profile.readRecallReport({
         reportFile: recallFile,
@@ -210,6 +260,9 @@ function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
         // The same bar corpus-seed.yml's seed re-check uses: a published seed is graded against the
         // fixed ABSOLUTE_FLOOR, never re-judged by a later, higher committed floor.
         floorValue: profile.floorValue,
+        // Ignored by a pre-D7 reader, which then fails closed on a retirement-bearing report's totals.
+        coverageBytes,
+        ...(profile.fixtureStores ? { fixtureStores: profile.fixtureStores } : {}),
       });
     } catch (error) {
       return reject(`incompatible: recall report fails this runtime's reader (${error.message})`);
@@ -221,6 +274,8 @@ function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
       asset: ARCHIVE_ASSET,
       sha256: digest,
       bytes: archive.size,
+      // The nightly descriptor keeps its pre-D7 shape even when a retirement claim fetched the coverage.
+      ...(coverage && requireCoverage ? { coverage } : {}),
       sourceCommit: typeof receipt.builderSourceSha === 'string' ? receipt.builderSourceSha : null,
       // Informational only since D4: the runtime that BUILT the seed, which may be older than the
       // runtime about to consume it. Nothing gates on it.
@@ -233,7 +288,7 @@ function judgeRelease({ run, repo, tag, digest, profile, rejected }) {
 
 export async function resolveNextCorpusSeed({
   repo, run = defaultRun, root = ROOT, runtimeRoot = null, fixtureFile = null, bootstrapFile,
-  limit = 100, searchBound = SEARCH_BOUND, profile = null,
+  limit = 100, searchBound = SEARCH_BOUND, profile = null, requireCoverage = false,
 } = {}) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(String(repo || ''))) throw new Error('--repo must be owner/name');
   if (!Number.isSafeInteger(searchBound) || searchBound < 1) throw new Error('search bound must be a positive integer');
@@ -250,7 +305,7 @@ export async function resolveNextCorpusSeed({
   try {
     listed = ghJson(run, ['release', 'list', '--repo', repo, '--limit', String(limit), '--json', 'tagName,isDraft,createdAt']) || [];
   } catch (error) {
-    rejected.push({ tag: null, reason: `release list failed (${error.message})` });
+    rejected.push({ tag: null, reason: `release list failed (${error.message})`, indeterminate: true });
   }
 
   // Every corpus-shaped tag that is NOT usable gets an explicit reason. A silently skipped row is
@@ -273,7 +328,8 @@ export async function resolveNextCorpusSeed({
   }
   const expects = { model: compatibility.model, dimensions: compatibility.dimensions, fixtureSha256: compatibility.fixtureSha256 };
   for (const candidate of judged) {
-    const resolved = judgeRelease({ run, repo, tag: candidate.tag, digest: candidate.digest, profile: compatibility, rejected });
+    const resolved = judgeRelease({ run, repo, tag: candidate.tag, digest: candidate.digest, profile: compatibility, rejected,
+      requireCoverage });
     if (resolved) return { seed: resolved, rejected, judged: judged.length, expects };
   }
 
@@ -311,6 +367,7 @@ export async function main(argv = process.argv.slice(2), { run = defaultRun, std
       runtimeRoot: arg(argv, '--runtime-root', null),
       fixtureFile: arg(argv, '--fixture', null),
       bootstrapFile: arg(argv, '--bootstrap', null),
+      requireCoverage: argv.includes('--require-coverage'),
       run,
     });
   } catch (error) {

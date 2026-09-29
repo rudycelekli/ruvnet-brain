@@ -44,7 +44,14 @@
 // Usage:
 //   node scripts/rehearse-corpus-pipeline.mjs [--repos 2] [--gists 3] [--generations 2]
 //        [--accuracy-sample <n>|full] [--receipt <file>] [--seed <local ruvnet-brain.zip>] [--keep] [--tamper <mode>]
-//        [--no-seed-selection] [--no-code-release-between]
+//        [--no-seed-selection] [--no-code-release-between] [--no-code-release-consumption]
+//        [--inject-store-failure transient|qa] [--inject-generation <n>] [--recall-fixture scoped|committed]
+//
+// ADR-0091 D7: `--recall-fixture committed` keeps the COMMITTED 182-question fixture unedited instead of
+// scoping it. The fixture repositories the bounded observation drops then have no row in a complete
+// sealed observation, so the production repo-recall gate RETIRES them (D7.2) -- the rehearsal asserts it
+// retired exactly those and asked the rest, and every reader re-verifies the claim from coverage (D7.3).
+// Every candidate's manifest.json `corpus` block (D7.1) is checked against its sealed coverage in both modes.
 //
 // ADR-0091 D4 (V4): from generation 2 on, the seed is chosen by the REAL scripts/corpus-next-seed.mjs
 // resolver from a local registry holding generation N (exactly the files release.mjs tried to upload)
@@ -67,6 +74,13 @@ export const REAL_ROOT = path.resolve(HERE, '..');
 const BANNER = 'BOUNDED REHEARSAL — a small explicitly-bounded subset, NOT a full corpus build';
 const HEX64 = /^[a-f0-9]{64}$/;
 const TAMPER_MODES = new Set(['none', 'extracted-byte', 'archive-byte', 'bypass-interception']);
+// ADR-0091 D5 (V5): inject ONE store failure into a real reconciliation. `transient` fails the target's
+// first `git clone` (it must be retried once, in a fresh worker directory, and recover); `qa` answers the
+// target's forge-refresh with corpus-qa's refusal status without running it (it must NOT be retried, and
+// the store must be carried at its re-hashed seed bytes as STALE + carry). Both are synthetic, declared
+// in the receipt, and applied at the process-runner seam executeReconciliation already exposes.
+const INJECTION_MODES = new Set(['none', 'transient', 'qa']);
+const RECALL_FIXTURE_MODES = new Set(['scoped', 'committed']);
 const PROBE_ARG = '__rehearsal_probe__';
 
 // Every `gh`/`npm` invocation that would MUTATE anything outside this process. Matched against the
@@ -636,6 +650,41 @@ export function recordReconciliation({ summarize, reconciliation, durationMs }) 
   };
 }
 
+/**
+ * ADR-0091 D7, read from the REAL sealed artifacts of one generation (never recomputed from inputs):
+ *   D7.1 the assembled manifest.json `corpus` block names the sealed observation's observedAt (not the
+ *        assembly time) and counts exactly the sealed coverage's eligible repository rows;
+ *   D7.2 in `committed` mode the recall report retired EXACTLY the fixture repositories the bounded
+ *        observation dropped, asked every other one, and bound the claim to the sealed coverage bytes.
+ */
+export function checkGenerationCurrency({ checkoutRoot, candidateDir, bundleFile, committedFixture, expectedRetired, expectedAsked }) {
+  const coverageFile = path.join(checkoutRoot, 'data', 'source-coverage.json');
+  const coverage = JSON.parse(fs.readFileSync(coverageFile, 'utf8'));
+  const corpus = JSON.parse(fs.readFileSync(path.join(candidateDir, 'manifest.json'), 'utf8')).corpus;
+  const eligible = coverage.rows.filter((row) => row.kind === 'repository' && row.disposition === 'eligible');
+  const count = (status) => eligible.filter((row) => row.status === status).length;
+  const problems = [];
+  if (!corpus || corpus.basis !== 'sealed-observation') problems.push(`manifest.corpus basis is ${corpus?.basis}`);
+  if (corpus?.observedAt !== coverage.observedAt) problems.push(`manifest.corpus.observedAt ${corpus?.observedAt} is not the sealed observation's ${coverage.observedAt}`);
+  const counts = corpus?.counts || {};
+  for (const [key, status] of [['current', 'CURRENT'], ['stale', 'STALE'], ['missing', 'MISSING'], ['unverified', 'UNVERIFIED']]) {
+    if (counts[key] !== count(status)) problems.push(`manifest.corpus.counts.${key}=${counts[key]}, sealed coverage has ${count(status)}`);
+  }
+  if (counts.eligible !== eligible.length) problems.push(`manifest.corpus.counts.eligible=${counts.eligible}, sealed coverage has ${eligible.length}`);
+  const report = JSON.parse(fs.readFileSync(`${bundleFile}.recall.json`, 'utf8'));
+  const want = [...new Set(expectedRetired.map((store) => store.toLowerCase()))].sort();
+  const got = report.retirement?.stores ?? [];
+  if (committedFixture) {
+    if (JSON.stringify(got) !== JSON.stringify(want)) problems.push(`recall retired [${got.join(', ')}], expected exactly [${want.join(', ')}]`);
+    if (report.totals.questions !== expectedAsked) problems.push(`recall asked ${report.totals.questions}, expected ${expectedAsked}`);
+    if (want.length && report.retirement?.coverageSha256 !== sha256File(coverageFile)) problems.push('recall retirement is not bound to the sealed coverage bytes');
+    if (counts.retired !== want.length) problems.push(`manifest.corpus.counts.retired=${counts.retired}, expected ${want.length}`);
+  } else if (got.length) problems.push(`a scoped fixture retired [${got.join(', ')}]; nothing should retire`);
+  if (problems.length) fail(`ADR-0091 D7 generation checks failed: ${problems.join('; ')}`);
+  return { manifestCorpus: corpus, recall: { questions: report.totals.questions, retired: report.totals.retired ?? 0,
+    retiredStores: got, coverageSha256: report.retirement?.coverageSha256 ?? null } };
+}
+
 async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds, recorder, tamper, log }) {
   const generation = { index, startedAt: new Date().toISOString(), seed: { tag: seed.tag, sha256: seed.sha256, bytes: seed.bytes, channel: seed.channel } };
   const assetsDir = path.join(workRoot, `assets-gen${index}`);
@@ -682,9 +731,43 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
   // seed RVF bytes so planReconciliation must rebuild them from upstream. Without this a seed whose
   // stores are already CURRENT would exercise no acquisition at all, and the rehearsal would prove
   // nothing about the expensive half of the pipeline.
+  const injection = bounds.injectStoreFailure !== 'none' && index === bounds.injectGeneration ? bounds.injectStoreFailure : 'none';
+  let injectTarget = null;
+  if (injection !== 'none') {
+    const upstreamOf = (store) => full.repositories.rows.find((row) => String(row.storeName || row.name).toLowerCase() === store)
+      ?.defaultBranchRef?.target?.oid?.toLowerCase() || null;
+    const seedCommitOf = (store) => String(Object.entries(seedLedger.stores || {})
+      .find(([name]) => name.toLowerCase() === store)?.[1]?.sourceCommit || '').toLowerCase();
+    // A carry needs seed bytes at a commit that DIFFERS from upstream; a transient retry needs neither.
+    const carryable = (store) => /^[0-9a-f]{40}$/.test(seedCommitOf(store)) && upstreamOf(store) && seedCommitOf(store) !== upstreamOf(store);
+    injectTarget = injection === 'transient' ? repoStores[0] : repoStores.find(carryable) || null;
+    if (!injectTarget && injection === 'qa') {
+      // The smallest bounded stores are often unchanged since the seed. A QA-injected store is never
+      // embedded (its forge-refresh is answered synthetically), so adding the smallest carryable seed
+      // store to the bounded set costs one clone. Declared in the receipt.
+      const extra = [...full.repositories.rows]
+        .sort((a, b) => (a.diskUsage ?? Number.MAX_SAFE_INTEGER) - (b.diskUsage ?? Number.MAX_SAFE_INTEGER))
+        .map((row) => String(row.storeName || row.name).toLowerCase())
+        .find((store) => !repoStores.includes(store) && carryable(store)) || null;
+      if (extra) {
+        repoStores.push(extra);
+        generation.bounded.repositories = repoStores;
+        generation.bounded.addedForInjection = extra;
+        injectTarget = extra;
+      }
+    }
+    if (!injectTarget) {
+      fail(`--inject-store-failure ${injection}: no observed store has seed bytes at a commit that differs from upstream, `
+        + 'so nothing could be carried');
+    }
+    generation.injection = { mode: injection, target: injectTarget, synthetic: true, events: [] };
+    log(`[gen ${index}] INJECTING a synthetic ${injection} failure into store ${injectTarget}`);
+  }
   if (bounds.forceRebuild) {
-    for (const store of repoStores) fs.rmSync(path.join(assetsDir, `${store}.big.rvf`), { force: true });
-    generation.forcedRebuild = repoStores;
+    // A QA-injected store keeps its seed bytes: they are what the carry must re-hash and keep.
+    const forced = repoStores.filter((store) => !(injection === 'qa' && store === injectTarget));
+    for (const store of forced) fs.rmSync(path.join(assetsDir, `${store}.big.rvf`), { force: true });
+    generation.forcedRebuild = forced;
   }
 
   // Every other seed store stays in scope FROZEN at its seed sourceCommit (see boundObservation), so
@@ -706,11 +789,16 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
     .repositories.rows.map((row) => String(row.storeName || row.name));
   const scoped = scopeRecallFixture({
     fixture: JSON.parse(fs.readFileSync(originalFixtureFile, 'utf8')), inScopeStores: inScope });
-  fs.writeFileSync(fixtureFile, `${JSON.stringify(scoped.fixture, null, 2)}\n`);
-  generation.bounded.recallFixture = { questions: scoped.kept, excluded: scoped.excluded.length,
+  const committedFixture = bounds.recallFixture === 'committed';
+  // ADR-0091 D7: in `committed` mode the fixture is NOT edited; the out-of-scope repositories are
+  // retired by the production gate instead, which the checks after sealing hold to exactly this list.
+  if (!committedFixture) fs.writeFileSync(fixtureFile, `${JSON.stringify(scoped.fixture, null, 2)}\n`);
+  generation.bounded.recallFixture = { mode: bounds.recallFixture, questions: scoped.kept, excluded: scoped.excluded.length,
     excludedStores: scoped.excluded,
     reason: 'no seed sourceCommit to freeze at (the real nightly rebuilds these from upstream) or not observed upstream' };
-  log(`[gen ${index}] repo-recall fixture scoped to ${scoped.kept} in-scope repositories (${scoped.excluded.length} out of scope, listed in the receipt)`);
+  log(committedFixture
+    ? `[gen ${index}] repo-recall fixture kept COMMITTED and unedited: ${scoped.excluded.length} out-of-scope repositories must be RETIRED by the gate (ADR-0091 D7), ${scoped.kept} asked`
+    : `[gen ${index}] repo-recall fixture scoped to ${scoped.kept} in-scope repositories (${scoped.excluded.length} out of scope, listed in the receipt)`);
 
   // --- reconcile + assemble ONCE --------------------------------------------------------------
   const invocations = [];
@@ -723,6 +811,29 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
     row.exit = result.status ?? null;
     return result;
   };
+  const injectingRun = (command, args, options) => {
+    const events = generation.injection?.events;
+    const target = generation.injection?.target;
+    const clone = command === 'git' && args[0] === 'clone';
+    const cloneDir = clone ? String(args.at(-1)) : '';
+    if (target && clone && path.basename(path.dirname(cloneDir)) === target && injection === 'transient') {
+      events.push({ event: 'git clone', dir: path.relative(workRoot, cloneDir), injected: 'transient failure (exit 128)' });
+      return Promise.resolve({ status: 128, stdout: '', stderr: '[rehearsal] injected transient failure: connection reset' });
+    }
+    if (target && clone && path.basename(path.dirname(cloneDir)).startsWith(`${target}-retry`)) {
+      events.push({ event: 'git clone', dir: path.relative(workRoot, cloneDir), injected: null });
+    }
+    const forge = command === process.execPath && String(args[0]).endsWith(`${path.sep}forge-refresh.mjs`);
+    if (target && forge && args[args.indexOf('--name') + 1] === target) {
+      if (injection === 'qa') {
+        events.push({ event: 'forge-refresh', out: path.relative(workRoot, args[args.indexOf('--out') + 1]),
+          injected: `corpus-qa refusal (exit ${api.CORPUS_QA_FAILED_EXIT}), forge not run` });
+        return Promise.resolve({ status: api.CORPUS_QA_FAILED_EXIT, stdout: '', stderr: '[rehearsal] injected corpus-qa refusal' });
+      }
+      events.push({ event: 'forge-refresh', out: path.relative(workRoot, args[args.indexOf('--out') + 1]), injected: null });
+    }
+    return api.defaultRunAsync(command, args, options);
+  };
   const reconcileStart = Date.now();
   const { reconciliation, candidate } = await api.reconcileAndPrepareCorpusCandidate({
     assetsDir, workspaceDir, root: checkoutRoot, owner: bounds.owner, builderSha: bounds.builderSha,
@@ -730,7 +841,8 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
     // reconcileAndPrepareCorpusCandidate reads `maxAttempts`; `maxRounds` was silently ignored after
     // cd0f032f, so --max-rounds never reached the acquisition loop.
     bootstrapIdentity, maxAttempts: bounds.maxRounds, accuracySample: bounds.accuracyQuestions,
-    reconcile: (options) => api.acquireCorpusGeneration({ ...options, observe: boundedObserve }),
+    reconcile: (options) => api.acquireCorpusGeneration({ ...options, observe: boundedObserve,
+      ...(injection !== 'none' ? { execute: (executeOptions) => api.executeReconciliation({ ...executeOptions, run: injectingRun }) } : {}) }),
     prepare: (options) => api.prepareCorpusCandidate({ ...options, run: recordingRun }),
   });
   generation.reconciliation = recordReconciliation({
@@ -765,6 +877,38 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
   generation.candidate.storeCount = receipt.storeCount;
   generation.candidate.stores = receipt.stores.map(({ name, kind }) => ({ name, kind }));
   log(`[gen ${index}] sealed candidate ${archiveSha256.slice(0, 16)} — ${receipt.storeCount} stores, ${archiveBytes} bytes`);
+  generation.degraded = candidate.degraded || { carried: [], missing: [] };
+  if (injection !== 'none') {
+    const sealedCoverage = JSON.parse(fs.readFileSync(path.join(checkoutRoot, 'data', 'source-coverage.json'), 'utf8'));
+    const row = sealedCoverage.rows.find((entry) => entry.kind === 'repository' && String(entry.artifact?.store).toLowerCase() === injectTarget);
+    generation.injection.sealedRow = row ? { status: row.status, carry: row.carry ?? null, failure: row.failure ?? null,
+      artifactSourceCommit: row.artifact?.sourceCommit ?? null, upstreamSha: row.upstream?.sha ?? null } : null;
+    const events = generation.injection.events;
+    const problems = [];
+    if (injection === 'qa') {
+      const carried = generation.degraded.carried.find((entry) => entry.store === injectTarget);
+      if (!carried || carried.attempts !== 1 || !/^qa: /.test(carried.reason)) problems.push(`${injectTarget} was not carried once as a QA failure (${JSON.stringify(carried || null)})`);
+      if (events.filter((entry) => entry.event === 'forge-refresh').length !== 1) problems.push('a QA failure was retried');
+      if (row?.status !== 'STALE' || !row?.carry) problems.push(`the sealed coverage row is ${row?.status || 'absent'}${row?.carry ? '' : ' with no carry record'}, not STALE + carry`);
+    } else {
+      if (!generation.reconciliation.refreshed.includes(injectTarget)) problems.push(`${injectTarget} did not recover on its retry`);
+      const clones = events.filter((entry) => entry.event === 'git clone');
+      if (clones.length !== 2 || !clones[1].dir.includes(`${injectTarget}-retry1`)) problems.push(`expected one failed clone then one retry in ${injectTarget}-retry1 (${JSON.stringify(clones)})`);
+      if (generation.degraded.carried.length || generation.degraded.missing.length) problems.push('a recovered transient failure left the generation degraded');
+      if (row?.status !== 'CURRENT') problems.push(`the recovered store's sealed row is ${row?.status}, not CURRENT`);
+    }
+    generation.injection.verdict = problems.length ? 'FAIL' : 'PASS';
+    if (problems.length) fail(`injected ${injection} failure did not behave as ADR-0091 D5 requires: ${problems.join('; ')}`);
+    log(`[gen ${index}] injected ${injection} failure in ${injectTarget} behaved as required: `
+      + `${injection === 'qa' ? 'not retried, carried at its seed bytes, sealed row STALE + carry' : 'retried once in a fresh directory and recovered'}`);
+  }
+
+  // --- ADR-0091 D7: the manifest's currency block and the recall gate's retirement, from real bytes --
+  generation.d7 = checkGenerationCurrency({ checkoutRoot, candidateDir, bundleFile,
+    committedFixture, expectedRetired: scoped.excluded, expectedAsked: scoped.kept });
+  log(`[gen ${index}] ADR-0091 D7: manifest.corpus observedAt=${generation.d7.manifestCorpus.observedAt} `
+    + `counts=${JSON.stringify(generation.d7.manifestCorpus.counts)}; recall asked ${generation.d7.recall.questions}, `
+    + `retired ${generation.d7.recall.retired}`);
 
   // --- remove access to the originals, then verify the extracted bytes ------------------------
   generation.extractedByteVerification = await verifyExtractedBytesWithoutOriginals({
@@ -773,8 +917,20 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
   });
   log(`[gen ${index}] extracted-byte verification passed with staging revoked (${generation.extractedByteVerification.files} files)`);
 
-  // --- rehearse the real product-consumption path, publication RECORDED not executed -----------
+  // --- ADR-0091 D5 + D10: a degraded generation is sealed but not published until D10 allows it ---
   const corpusTag = `corpus-sha256-${archiveSha256}`;
+  if (generation.degraded.carried.length || generation.degraded.missing.length) {
+    const decision = api.degradedPublication();
+    if (!decision.allowed) {
+      generation.publication = { status: 'WITHHELD-DEGRADED', corpusTag, reason: decision.reason,
+        carried: generation.degraded.carried.map((entry) => entry.store), missing: generation.degraded.missing.map((entry) => entry.store) };
+      generation.finishedAt = new Date().toISOString();
+      log(`[gen ${index}] degraded generation sealed and WITHHELD from publication: ${decision.reason}`);
+      return { generation, withheld: true, nextSeed: null, published: null };
+    }
+  }
+
+  // --- rehearse the real product-consumption path, publication RECORDED not executed -----------
   const proof = recorder.proveIntercepting();
   if (!proof.ok) {
     generation.publication = { status: 'FAIL', reason: 'command interception could not be proven; refusing to run a publication path that might reach the network', proof };
@@ -793,8 +949,13 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
     GH_TOKEN: 'rehearsal-invalid-token-do-not-use',
     GITHUB_TOKEN: 'rehearsal-invalid-token-do-not-use',
   };
+  // ADR-0091 D6.2: the sealed coverage travels to the publisher the way corpus-seed.yml stages it
+  // (a copy of <checkout>/data/source-coverage.json beside the archive), and is published with it.
+  const stagedCoverage = path.join(path.dirname(bundleFile), 'source-coverage.json');
+  fs.copyFileSync(path.join(checkoutRoot, 'data', 'source-coverage.json'), stagedCoverage);
   const publish = run(process.execPath, [path.join(checkoutRoot, 'scripts', 'release.mjs'), '--corpus-seed',
     '--corpus-tag', corpusTag, '--corpus-bundle', bundleFile, '--corpus-receipt', candidate.receiptFile,
+    '--corpus-coverage', stagedCoverage,
     '--target', bounds.builderSha, '--repo', 'stuinfla/ruvnet-brain'], { cwd: checkoutRoot, env: publishEnv });
   const recordedNow = recorder.recorded().filter((row) => row.classification === 'publication-mutation');
   generation.publication = {
@@ -830,6 +991,10 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
     if (!fs.existsSync(report)) fail(`candidate ${index} has no detached ${suffix} report to hand to generation ${index + 1}`);
     fs.copyFileSync(report, `${nextSeedFile}${suffix}`);
   }
+  // ADR-0091 D7.3: the generation's sealed coverage travels with it, so the next import can verify a
+  // retirement its recall report claims (the published CORPUS-COVERAGE.json is these exact bytes).
+  const nextSeedCoverage = path.join(path.dirname(nextSeedFile), 'CORPUS-COVERAGE.json');
+  fs.copyFileSync(stagedCoverage, nextSeedCoverage);
   generation.nextSeed = { tag: corpusTag, sha256: archiveSha256, bytes: archiveBytes, file: nextSeedFile,
     contentAddressed: true };
   generation.finishedAt = new Date().toISOString();
@@ -837,7 +1002,7 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
   return {
     generation,
     nextSeed: { file: nextSeedFile, tag: corpusTag, sha256: archiveSha256, bytes: archiveBytes,
-      channel: `candidate-generation-${index}`, allowPinnedTag: false, receiptFile: candidate.receiptFile },
+      channel: `candidate-generation-${index}`, allowPinnedTag: false, receiptFile: candidate.receiptFile, coverageFile: nextSeedCoverage },
     // ADR-0091 D4: exactly what release.mjs tried to upload, so the local registry invents nothing.
     published: { tag: corpusTag, createArgs: createRow ? createRow.args : [], receiptFile: candidate.receiptFile,
       recallFile: `${bundleFile}.recall.json`, accuracyFile: `${bundleFile}.accuracy.json`, sha256: archiveSha256, bytes: archiveBytes },
@@ -853,7 +1018,8 @@ async function runGeneration({ index, api, checkoutRoot, workRoot, seed, bounds,
 function publishLocally({ selectionMod, registryDir, published, workRoot, index }) {
   const files = selectionMod.uploadedFilesOf(published.createArgs);
   const names = files.map((file) => path.basename(file)).sort();
-  const expectedNames = ['corpus-receipt.json', 'ruvnet-brain.zip', 'ruvnet-brain.zip.accuracy.json', 'ruvnet-brain.zip.recall.json'];
+  const expectedNames = ['CORPUS-COVERAGE.json', 'corpus-receipt.json', 'coverage-receipt.json', 'ruvnet-brain.zip',
+    'ruvnet-brain.zip.accuracy.json', 'ruvnet-brain.zip.recall.json'];
   if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
     fail(`release.mjs's recorded upload for generation ${index} is [${names.join(', ')}], expected [${expectedNames.join(', ')}]`);
   }
@@ -914,7 +1080,8 @@ async function selectPublishedSeed({ index, api, selectionMod, checkoutRoot, wor
   // now only ever sees a generation the resolver already passed.
   const dir = path.join(workRoot, `seed-gen${index}-selected`);
   fs.mkdirSync(dir, { recursive: true });
-  for (const name of ['ruvnet-brain.zip', 'corpus-receipt.json', 'ruvnet-brain.zip.recall.json', 'ruvnet-brain.zip.accuracy.json']) {
+  for (const name of ['ruvnet-brain.zip', 'corpus-receipt.json', 'ruvnet-brain.zip.recall.json', 'ruvnet-brain.zip.accuracy.json',
+    'CORPUS-COVERAGE.json', 'coverage-receipt.json']) {
     fs.copyFileSync(path.join(registryDir, selection.seed.tag, 'assets', name), path.join(dir, name), fs.constants.COPYFILE_FICLONE);
   }
   const file = path.join(dir, 'ruvnet-brain.zip');
@@ -923,16 +1090,134 @@ async function selectPublishedSeed({ index, api, selectionMod, checkoutRoot, wor
   if (sha256 !== selection.seed.sha256 || bytes !== selection.seed.bytes) fail(`selected seed download does not match its descriptor (${sha256}/${bytes})`);
   const archive = { file: 'ruvnet-brain.zip', sha256, bytes };
   api.readDiagnosticAccuracyReport({ reportFile: `${file}.accuracy.json`, archive });
+  // corpus-seed.yml's seed-recall-verify block: the seed's own sidecar coverage, verified, then handed to
+  // the reader so a claimed retirement is recomputed rather than trusted (ADR-0091 D7.3).
+  const coverageBytes = fs.readFileSync(path.join(dir, 'CORPUS-COVERAGE.json'));
+  api.verifyCoverageSidecar({ sidecar: JSON.parse(fs.readFileSync(path.join(dir, 'coverage-receipt.json'), 'utf8')), coverageBytes,
+    generationTag: selection.seed.tag, archiveSha256: sha256, archiveBytes: bytes });
+  const fixture = api.loadFixture();
   const { report } = api.readRecallReport({ reportFile: `${file}.recall.json`, archive,
-    expectedFixtureSha256: api.loadFixture().fixtureSha256, floorValue: 0 });
-  record.downstreamRecheck = { repoCoverage: report.totals.repoCoverage, questions: report.totals.questions, hitTop5: report.totals.hitTop5 };
+    expectedFixtureSha256: fixture.fixtureSha256, floorValue: 0, coverageBytes,
+    fixtureStores: fixture.questions.map((question) => question.store) });
+  record.downstreamRecheck = { repoCoverage: report.totals.repoCoverage, questions: report.totals.questions, hitTop5: report.totals.hitTop5,
+    retired: report.totals.retired ?? 0 };
   phase(`generation-${index}-seed-selection`, 'PASS', {
     selected: selection.seed.tag, builtUnder: `v${selection.seed.brainVersion}`, consumingRuntime: `v${consumingVersion}`,
     skipped: selection.rejected.map((row) => `${row.tag.slice(0, 26)}...: ${row.reason}`),
     archiveDownloadAttempts: 0, preD4RuntimeRule: record.preD4RuntimeRule,
     reason: `the real corpus-next-seed resolver walked past ${expected.decoys.length} newer incompatible generation(s) without downloading an archive and chose generation ${index - 1}, built under an older runtime` });
   return { file, tag: selection.seed.tag, sha256, bytes, channel: 'published-generation-selected', allowPinnedTag: false,
-    receiptFile: path.join(dir, 'corpus-receipt.json'), builtUnder: selection.seed.brainVersion };
+    receiptFile: path.join(dir, 'corpus-receipt.json'), builtUnder: selection.seed.brainVersion,
+    coverageFile: path.join(dir, 'CORPUS-COVERAGE.json') };
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR-0091 D6 (V6a/V6c): a CODE RELEASE consumes the published generation
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What ci.yml's release-qe does after D6, against the local registry: resolve in code-release mode
+ * (the real resolver, --require-coverage: decoys without a coverage sidecar are skipped), download the
+ * generation plus its sidecar, and assemble through the REAL orchestrator on the single-pass path --
+ * a real build-bundle run with the generation's sealed coverage and seed identity, which had never
+ * been exercised against a generation before. V6a: the generation directory is byte-unchanged and the
+ * archive's store bytes equal the generation's. D6.4: the frozen fixture is judged against the live
+ * eligible set by the shared denominator.
+ */
+async function rehearseCodeRelease({ index, api, selectionMod, checkoutRoot, workRoot, registryDir, repoSlug, expected, receipt, phase, log }) {
+  const name = `code-release-from-generation-${index}`;
+  const gh = selectionMod.registryGh(registryDir);
+  const selection = await api.resolveNextCorpusSeed({ repo: repoSlug, root: checkoutRoot, run: gh.run, runtimeRoot: checkoutRoot,
+    requireCoverage: true });
+  const record = { generation: index, selected: { origin: selection.seed.origin, tag: selection.seed.tag },
+    rejected: selection.rejected, archiveDownloadAttempts: gh.archiveDownloadAttempts().length };
+  receipt.codeReleaseConsumption = [...(receipt.codeReleaseConsumption || []), record];
+  if (selection.seed.origin !== 'published-generation' || selection.seed.tag !== expected.tag || !selection.seed.coverage) {
+    phase(name, 'FAIL', { reason: `code-release resolution chose ${selection.seed.origin} ${selection.seed.tag}, expected ${expected.tag} with its coverage` });
+    fail(`${name}: the code-release resolver did not choose the published generation`);
+  }
+  const dir = path.join(workRoot, `code-release-gen${index}`);
+  const evidence = path.join(dir, 'release-evidence');
+  const extracted = path.join(dir, 'extracted');
+  fs.mkdirSync(evidence, { recursive: true });
+  for (const asset of ['ruvnet-brain.zip', 'CORPUS-COVERAGE.json', 'coverage-receipt.json']) {
+    fs.copyFileSync(path.join(registryDir, selection.seed.tag, 'assets', asset), path.join(dir, asset), fs.constants.COPYFILE_FICLONE);
+  }
+  const zip = path.join(dir, 'ruvnet-brain.zip');
+  if (sha256File(zip) !== selection.seed.sha256) fail(`${name}: downloaded generation does not match its descriptor`);
+  await api.extractZip(zip, extracted);
+  const descriptorFile = path.join(evidence, 'corpus-seed.json');
+  fs.writeFileSync(descriptorFile, `${JSON.stringify(selection.seed, null, 2)}\n`);
+  const outputs = [];
+  const capture = (command, args, options = {}) => {
+    const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...options });
+    outputs.push({ script: path.basename(String(args?.[0] || command)), exit: result.status,
+      tail: result.status === 0 ? undefined : String(result.stderr || result.stdout || '').trim().slice(-800) });
+    return result;
+  };
+  const started = Date.now();
+  let assembled;
+  try {
+    assembled = api.assembleCodeReleaseCorpus({ root: checkoutRoot, descriptor: selection.seed, seedBundle: zip, assetsDir: extracted,
+      evidenceDir: evidence, coverageFile: path.join(dir, 'CORPUS-COVERAGE.json'),
+      coverageReceiptFile: path.join(dir, 'coverage-receipt.json'), run: capture, env: { ...process.env } });
+  } catch (error) {
+    record.steps = outputs;
+    phase(name, 'FAIL', { reason: error.message, steps: outputs });
+    throw error;
+  }
+  record.assembly = { mode: assembled.mode, durationMs: Date.now() - started, steps: outputs, unmutated: assembled.unmutated,
+    seedTree: assembled.seedTree };
+  const releaseCoverage = JSON.parse(fs.readFileSync(path.join(checkoutRoot, 'dist', 'ruvnet-brain', 'COVERAGE.json'), 'utf8'));
+  // ADR-0091 D7.1: a code release built FROM a generation names it, and dates itself by its observation.
+  const releaseCorpus = JSON.parse(fs.readFileSync(path.join(checkoutRoot, 'dist', 'ruvnet-brain', 'manifest.json'), 'utf8')).corpus;
+  const generationCoverage = JSON.parse(fs.readFileSync(path.join(dir, 'CORPUS-COVERAGE.json'), 'utf8'));
+  record.manifestCorpus = releaseCorpus;
+  if (releaseCorpus?.basis !== 'sealed-observation' || releaseCorpus.generationTag !== selection.seed.tag
+    || releaseCorpus.observedAt !== generationCoverage.observedAt) {
+    phase(name, 'FAIL', { reason: `code-release manifest.corpus does not name its generation and observation: ${JSON.stringify(releaseCorpus)}` });
+    fail(`${name}: manifest.corpus is ${JSON.stringify(releaseCorpus)}`);
+  }
+  const fixture = JSON.parse(fs.readFileSync(path.join(checkoutRoot, 'data', 'retrieval-query-evidence.json'), 'utf8'));
+  const denominator = api.fixtureDenominator({ coverage: releaseCoverage, fixtureStores: Object.keys(fixture.queries) });
+  record.canaryDenominator = { fixture: denominator.fixture.length, questioned: denominator.questioned.length,
+    retired: denominator.retired, blocking: denominator.blocking, unfixturedEligible: denominator.unfixturedEligible.length,
+    corpusSeed: releaseCoverage.corpusSeed };
+  if (assembled.mode !== 'single-pass' || denominator.blocking.length || releaseCoverage.corpusSeed?.tag !== selection.seed.tag) {
+    phase(name, 'FAIL', { reason: `mode=${assembled.mode}, blocking=${JSON.stringify(denominator.blocking)}, coverage seed=${releaseCoverage.corpusSeed?.tag}` });
+    fail(`${name}: the code release did not assemble single-pass from the generation with an admissible canary denominator`);
+  }
+  const guard = api.checkNoNewerCorpusGeneration({ sealed: selection.seed,
+    resolution: await api.resolveNextCorpusSeed({ repo: repoSlug, root: checkoutRoot, run: selectionMod.registryGh(registryDir).run,
+      runtimeRoot: checkoutRoot, requireCoverage: true }) });
+  record.publishGuardBeforeNextGeneration = guard;
+  phase(name, 'PASS', { mode: assembled.mode, durationMs: record.assembly.durationMs, unmutated: assembled.unmutated,
+    canary: `${denominator.questioned.length}/${denominator.fixture.length} fixture stores questioned, ${denominator.retired.length} retired, `
+      + `${denominator.unfixturedEligible.length} unfixtured eligible recorded`,
+    reason: `release built single-pass from ${selection.seed.tag.slice(0, 26)}...: ${assembled.unmutated.files} store files byte-equal to the generation, `
+      + 'generation directory unchanged, no capability-only refresh or index repair; the publish guard passes while no newer generation exists' });
+  log(`[${name}] single-pass code release assembled in ${record.assembly.durationMs} ms`);
+  return { sealed: selection.seed, record };
+}
+
+/** V6c: once generation N+1 is published, a release QE'd from generation N must be refused at publish. */
+async function rehearsePublishGuard({ sealed, index, api, selectionMod, checkoutRoot, registryDir, repoSlug, record, phase }) {
+  const name = `publish-guard-after-generation-${index}`;
+  const resolution = await api.resolveNextCorpusSeed({ repo: repoSlug, root: checkoutRoot, run: selectionMod.registryGh(registryDir).run,
+    runtimeRoot: checkoutRoot, requireCoverage: true });
+  try {
+    api.checkNoNewerCorpusGeneration({ sealed, resolution });
+  } catch (error) {
+    record.publishGuardAfterNextGeneration = { refused: true, reason: error.message, newest: resolution.seed.tag };
+    if (!/re-run release QE/.test(error.message)) {
+      phase(name, 'FAIL', { reason: `refused for the wrong reason: ${error.message}` });
+      fail(`${name}: the guard refused for the wrong reason`);
+    }
+    phase(name, 'PASS', { reason: `publication of the release QE'd from ${sealed.tag.slice(0, 26)}... was REFUSED: ${error.message}` });
+    return;
+  }
+  phase(name, 'FAIL', { reason: `generation ${index} was published after QE, yet the publish guard allowed the older release` });
+  fail(`${name}: the backward-move guard did not refuse`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -948,6 +1233,9 @@ export async function rehearseCorpusPipeline({
   owner = 'ruvnet',
   tamper = 'none',
   tamperGeneration = 1,
+  injectStoreFailure = 'none',
+  injectGeneration = 1,
+  recallFixture = 'scoped',
   forceRebuild = true,
   seedOverride = null,
   // ADR-0091 D4. seedSelection: generation N+1's seed is chosen by the real corpus-next-seed resolver
@@ -956,6 +1244,9 @@ export async function rehearseCorpusPipeline({
   // so the chosen seed was built under an OLDER runtime than the one consuming it.
   seedSelection = true,
   codeReleaseBetween = true,
+  // ADR-0091 D6: after generation N is published locally, a code release consumes it (single-pass,
+  // real build) and, once generation N+1 is published, the publish-time guard must refuse that release.
+  codeReleaseConsumption = true,
   // null = the checkout's own C3_DIAGNOSTIC_SAMPLE_QUESTIONS (what CI runs); 'full' = no sample.
   accuracySample = null,
   keep = false,
@@ -964,6 +1255,12 @@ export async function rehearseCorpusPipeline({
   log = (line) => process.stderr.write(`${line}\n`),
 } = {}) {
   if (!TAMPER_MODES.has(tamper)) fail(`unknown --tamper mode ${tamper} (expected: ${[...TAMPER_MODES].join(', ')})`);
+  if (!RECALL_FIXTURE_MODES.has(recallFixture)) {
+    fail(`unknown --recall-fixture mode ${recallFixture} (expected: ${[...RECALL_FIXTURE_MODES].join(', ')})`);
+  }
+  if (!INJECTION_MODES.has(injectStoreFailure)) {
+    fail(`unknown --inject-store-failure mode ${injectStoreFailure} (expected: ${[...INJECTION_MODES].join(', ')})`);
+  }
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const receipt = {
@@ -973,7 +1270,7 @@ export async function rehearseCorpusPipeline({
     startedAt,
     host: { node: process.version, platform: `${process.platform}/${process.arch}` },
     bounds: { repos, gists, generations, maxRounds, owner, forceRebuild, tamper, tamperGeneration, accuracySample,
-      seedSelection, codeReleaseBetween },
+      seedSelection, codeReleaseBetween, codeReleaseConsumption, injectStoreFailure, injectGeneration, recallFixture },
     phases: [],
     generations: [],
     seedSelection: [],
@@ -1048,12 +1345,14 @@ export async function rehearseCorpusPipeline({
 
     // ---- phase 4: load the disposable checkout's own modules ---------------------------------
     const load = (relative) => import(pathToFileURL(path.join(checkoutRoot, relative)).href);
-    const [reconcileMod, coverageMod, candidateMod, zipMod, accuracyMod, nextSeedMod, approvedMod, recallMod, selectionMod] = await Promise.all([
+    const [reconcileMod, coverageMod, candidateMod, zipMod, accuracyMod, nextSeedMod, approvedMod, recallMod, selectionMod, failureMod] = await Promise.all([
       load('scripts/corpus-reconcile.mjs'), load('scripts/source-coverage.mjs'),
       load('scripts/corpus-candidate.mjs'), load('kb/zip-extract.mjs'), load('scripts/oracle/retrieval-accuracy.mjs'),
       load('scripts/corpus-next-seed.mjs'), load('scripts/approved-runtime.mjs'), load('scripts/oracle/repo-recall.mjs'),
-      load('scripts/rehearse-seed-selection.mjs'),
+      load('scripts/rehearse-seed-selection.mjs'), load('scripts/corpus-store-failure.mjs'),
     ]);
+    const [codeReleaseMod, denominatorMod, sidecarMod] = await Promise.all([
+      load('scripts/code-release-corpus.mjs'), load('scripts/fixture-denominator.mjs'), load('scripts/corpus-coverage-sidecar.mjs')]);
     // The same C3 question sample CI runs (ADR-0091 D2), unless the caller asked for the full audit.
     const accuracyQuestions = accuracySample === 'full' ? null
       : accuracySample == null ? accuracyMod.C3_DIAGNOSTIC_SAMPLE_QUESTIONS : Number(accuracySample);
@@ -1070,6 +1369,9 @@ export async function rehearseCorpusPipeline({
       reconcileAndPrepareCorpusCandidate: reconcileMod.reconcileAndPrepareCorpusCandidate,
       summarizeReconciliation: reconcileMod.summarizeReconciliation,
       prepareCorpusCandidate: reconcileMod.prepareCorpusCandidate,
+      executeReconciliation: reconcileMod.executeReconciliation,
+      defaultRunAsync: reconcileMod.defaultRunAsync,
+      degradedPublication: failureMod.degradedPublication,
       observeSourceUniverse: coverageMod.observeSourceUniverse,
       canonicalSourceObservation: coverageMod.canonicalSourceObservation,
       buildCoverage: coverageMod.buildCoverage,
@@ -1083,10 +1385,15 @@ export async function rehearseCorpusPipeline({
       readRecallReport: recallMod.readRecallReport,
       loadFixture: recallMod.loadFixture,
       readDiagnosticAccuracyReport: accuracyMod.readDiagnosticAccuracyReport,
+      assembleCodeReleaseCorpus: codeReleaseMod.assembleCodeReleaseCorpus,
+      checkNoNewerCorpusGeneration: codeReleaseMod.checkNoNewerCorpusGeneration,
+      fixtureDenominator: denominatorMod.fixtureDenominator,
+      verifyCoverageSidecar: sidecarMod.verifyCoverageSidecar,
     };
     for (const [name, value] of Object.entries(api)) {
       if (typeof value !== 'function') fail(`the disposable checkout does not export ${name}`);
     }
+    api.CORPUS_QA_FAILED_EXIT = failureMod.CORPUS_QA_FAILED_EXIT;
     phase('load-pipeline-entrypoints', 'PASS', { entrypoints: Object.keys(api).length });
 
     // ---- phase 5: real seed acquisition (or an explicit SKIP) --------------------------------
@@ -1118,6 +1425,7 @@ export async function rehearseCorpusPipeline({
     const registryDir = path.join(workRoot, 'release-registry');
     fs.mkdirSync(registryDir, { recursive: true });
     let lastPublished = null;
+    let codeRelease = null;
     for (let index = 1; index <= generations; index += 1) {
       if (index > 1 && codeReleaseBetween) {
         const release = selectionMod.simulateCodeRelease({ checkoutRoot });
@@ -1136,7 +1444,7 @@ export async function rehearseCorpusPipeline({
         // uses — the content-addressed tag, the archive bytes, and the schema-2 receipt together.
         const baseline = await api.verifySeedBaseline({
           seedDescriptor: { tag: seed.tag, sha256: seed.sha256, bytes: seed.bytes },
-          bundleFile: seed.file, receiptFile: seed.receiptFile,
+          bundleFile: seed.file, receiptFile: seed.receiptFile, coverageFile: seed.coverageFile ?? null,
         });
         phase(`generation-${index}-seed-baseline`, 'PASS', {
           tag: baseline.tag, sha256: baseline.sha256, stores: baseline.receipt.storeCount,
@@ -1144,7 +1452,8 @@ export async function rehearseCorpusPipeline({
       }
       const result = await runGeneration({
         index, api, checkoutRoot, workRoot, seed, recorder, tamper, log,
-        bounds: { repos, gists, owner, maxRounds, builderSha, forceRebuild, tamperGeneration, accuracyQuestions },
+        bounds: { repos, gists, owner, maxRounds, builderSha, forceRebuild, tamperGeneration, accuracyQuestions,
+          injectStoreFailure, injectGeneration, recallFixture },
       });
       receipt.generations.push(result.generation);
       phase(`generation-${index}`, 'PASS', {
@@ -1170,8 +1479,25 @@ export async function rehearseCorpusPipeline({
       phase(`generation-${index}-approved-runtime`, 'PASS', { ...runtimeCheck,
         reason: `verifyApprovedRuntime PASS: ${verdict.checked} runtime files equal the checkout's, none unpinned, seed ${seed.tag} did not leak an executable` });
 
-      if (seedSelection && index < generations) {
+      if (result.withheld) {
+        phase(`generation-${index}-publication`, 'PASS', { status: 'WITHHELD-DEGRADED', ...result.generation.publication,
+          reason: `degraded generation sealed but not published (ADR-0091 D5/D10): ${result.generation.publication.reason}` });
+        if (index < generations) {
+          phase('remaining-generations', 'SKIP', { reason: `generation ${index} was withheld, so there is no published generation ${index} to seed from` });
+        }
+        break;
+      }
+      const consumeNow = seedSelection && codeReleaseConsumption && !codeRelease;
+      if (seedSelection && (index < generations || codeRelease)) {
         lastPublished = publishLocally({ selectionMod, registryDir, published: result.published, workRoot, index });
+      }
+      if (codeRelease) {
+        await rehearsePublishGuard({ sealed: codeRelease.sealed, index, api, selectionMod, checkoutRoot, registryDir, repoSlug,
+          record: codeRelease.record, phase });
+        codeRelease = null;
+      } else if (consumeNow && index < generations) {
+        codeRelease = await rehearseCodeRelease({ index, api, selectionMod, checkoutRoot, workRoot, registryDir, repoSlug,
+          expected: lastPublished, receipt, phase, log });
       }
       seed = result.nextSeed;
     }
@@ -1259,10 +1585,14 @@ export async function main(argv = process.argv.slice(2)) {
     owner: arg(argv, '--owner', 'ruvnet'),
     tamper: arg(argv, '--tamper', 'none'),
     tamperGeneration: Number(arg(argv, '--tamper-generation', 1)),
+    injectStoreFailure: arg(argv, '--inject-store-failure', 'none'),
+    injectGeneration: Number(arg(argv, '--inject-generation', 1)),
+    recallFixture: arg(argv, '--recall-fixture', 'scoped'),
     forceRebuild: !argv.includes('--no-force-rebuild'),
     seedOverride: arg(argv, '--seed', null),
     seedSelection: !argv.includes('--no-seed-selection'),
     codeReleaseBetween: !argv.includes('--no-code-release-between'),
+    codeReleaseConsumption: !argv.includes('--no-code-release-consumption'),
     accuracySample: arg(argv, '--accuracy-sample', null),
     keep: argv.includes('--keep'),
     workRootParent: arg(argv, '--work-root', null),

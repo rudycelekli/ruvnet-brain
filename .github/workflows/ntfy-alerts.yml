@@ -14,8 +14,11 @@ on:
     # release-candidate-preflight, so a workflow_run on "ci" never fires. The four scheduled jobs
     # below were unwatched (corpus-nightly-dispatch among them while protected-release failed 16 days).
     # canonical-qa is deliberately absent: it runs on every PR and would page on routine PR redness.
+    # 2026-09-29: corpus-watchdog added — it is the one listener that pages when the corpus nightly
+    # goes quiet (a green stand-down is invisible to a red-only alert on the dispatcher itself).
     workflows: ["release-candidate-preflight", "integration-linux", "gists-nightly", "protected-release",
-                "corpus-nightly-dispatch", "published-surface-probe", "learning-replay", "model-catalog-refresh"]
+                "corpus-nightly-dispatch", "published-surface-probe", "learning-replay", "model-catalog-refresh",
+                "corpus-watchdog"]
     types: [completed]
 # The notify job needs nothing from the repo — strip the token to read-nothing so an injected
 # payload (were one ever to slip through again) has no credential to steal.

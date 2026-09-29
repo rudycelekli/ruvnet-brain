@@ -16,11 +16,15 @@ import { buildCoverage, observeSourceUniverse, renderMarkdown } from './source-c
 import { promoteArtifactSet } from '../kb/incremental-refresh.mjs';
 import { rebuildCorpusAggregates } from './corpus-aggregates.mjs';
 import { assertCapabilityOnlyStore, isCapabilityOnly, CAPABILITY_RETIRED_SUFFIXES } from '../kb/capability-only.mjs';
-import { fileIdentity } from '../plugin/scripts/coverage-integrity.mjs';
+import { eligibleRepositoryStanding, fileIdentity, validateCoverageLedger } from '../plugin/scripts/coverage-integrity.mjs';
+import {
+  CORPUS_QA_FAILED_EXIT, FAILURE_CLASS, StoreWorkerError, degradedBound, degradedPublication, failureReason, isRetryable,
+} from './corpus-store-failure.mjs';
 import { readDiagnosticAccuracyReport } from './oracle/retrieval-accuracy.mjs';
 import { storeRoot } from '../kb/store-root.mjs';
 import { captureGistSources } from './gist-receipts.mjs';
 import { projectSourceStore, RUNTIME_LEDGER_KIND } from './rvf-generation.mjs';
+import { compareKnowledgeInputs, fromCoverage as knowledgeFromCoverage, fromSeed as knowledgeFromSeed } from './knowledge-input-digest.mjs';
 
 export { rebuildCorpusAggregates };
 
@@ -128,6 +132,10 @@ function filesNamed(root, wanted) {
 // corpus-seed.yml can re-run seed extraction ONCE from the committed bootstrap in the same job.
 export const SEED_LEDGER_SCHEMA_VERSION = 2;
 export const SEED_LEDGER_INCOMPATIBLE_EXIT = 3;
+// ADR-0091 D5 + D10: the generation was built and SEALED with carried/missing stores, but degraded
+// publication is not yet allowed (no soaked tolerant-validator transition). It must not be published;
+// the next night re-plans the carried stores automatically because their sourceCommit still differs.
+export const DEGRADED_UNPUBLISHED_EXIT = 4;
 
 export class SeedLedgerIncompatibleError extends Error {
   constructor(reason) {
@@ -291,7 +299,7 @@ async function measureFreshness({ closingObservation, observation }) {
  * generation; `latest` is never substituted, and an exhausted partial generation is never accepted.
  */
 export async function acquireSealedGeneration({ maxAttempts = 3, assetsDir = null, observe, build,
-  readLedger: currentLedger, execute, prune, rebuild, preflight = null, closingObservation = null } = {}) {
+  readLedger: currentLedger, execute, prune, rebuild, preflight = null, closingObservation = null, unchanged = null } = {}) {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10
     || [observe, build, currentLedger, execute, prune, rebuild].some((fn) => typeof fn !== 'function')) {
     fail('bounded acquisition configuration is invalid');
@@ -299,15 +307,33 @@ export async function acquireSealedGeneration({ maxAttempts = 3, assetsDir = nul
   // ONE discovery pass. This observation is the sealed manifest every later step consumes; it is never
   // re-taken, so upstream churn cannot restart or invalidate the generation.
   const observation = await observe();
+  // NO-CHANGE, DECIDED BEFORE ANYTHING IS BUILT (2026-09-29 nightly redesign). When every knowledge
+  // input equals the seed's (scripts/knowledge-input-digest.mjs), the night ends here: no gist
+  // preflight, no clone, no embedding, no aggregate rebuild, nothing sealed or published.
+  if (typeof unchanged === 'function') {
+    const knowledgeInput = await unchanged(observation);
+    if (knowledgeInput?.unchanged === true) {
+      return { noChange: true, observation, attempts: [], consistencyModel: CONSISTENCY_MODEL, knowledgeInput };
+    }
+  }
   // Validate/fetch the source most likely to fail late (gist detail/raw access) before any expensive
   // repository clone and embedding work. Its verified bodies are the existing capture cache consumed
   // by the later aggregate build, so preflight does not double-fetch or weaken source binding.
   const preflightResult = typeof preflight === 'function' ? await preflight(observation) : null;
   const attempts = [];
+  // ADR-0091 D5: stores whose refresh FAILED this generation, keyed by folded store name, with what
+  // they became -- { carry } | { failure } | { integrity }. They are never re-executed by a later
+  // attempt of this loop and never count as remaining/unresolved: before D5 one stuck store cost all
+  // three attempts (each re-running a ~22-minute aggregate rebuild) and then failed the night anyway.
+  // The loop now re-attempts only for what it was built for: a gist revision that moved mid-fetch.
+  const storeOutcomes = {};
+  const recorded = (store) => Object.hasOwn(storeOutcomes, String(store || '').toLowerCase());
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const coverage = await build(observation);
-    const plan = planReconciliation({ coverage, ledger: currentLedger(), assetsDir });
+    const coverage = await build(observation, storeOutcomes);
+    const plan = planReconciliation({ coverage, ledger: currentLedger(), assetsDir }).filter((item) => !recorded(item.store));
     const reconciliation = await execute(plan, attempt);
+    recordStoreOutcomes(storeOutcomes, reconciliation);
+    assertIsolatedFailures({ coverage, storeOutcomes });
     const pruning = await prune(coverage, attempt);
     let aggregates;
     try {
@@ -327,14 +353,17 @@ export async function acquireSealedGeneration({ maxAttempts = 3, assetsDir = nul
     // row still pinned the PRE-rebuild ruv-gists digest and build-bundle refused the candidate with
     // "coverage row gist:... was measured against different ruv-gists RVF bytes than this corpus
     // carries", 56 minutes into an otherwise complete run.
-    const settled = await build(observation);
-    const remaining = planReconciliation({ coverage: settled, ledger: currentLedger(), assetsDir });
-    const unresolved = settled.rows.filter((row) => row.disposition === 'eligible' && row.status !== 'CURRENT');
+    const settled = await build(observation, storeOutcomes);
+    const remaining = planReconciliation({ coverage: settled, ledger: currentLedger(), assetsDir })
+      .filter((item) => !recorded(item.store));
+    const unresolved = settled.rows.filter((row) => row.disposition === 'eligible' && row.status !== 'CURRENT'
+      && !(row.kind === 'repository' && recorded(row.artifact?.store)));
     attempts.push({ attempt, plan, ...reconciliation, ...pruning, ...aggregates,
       remainingArtifacts: remaining.length, unresolvedSources: unresolved.length });
     if (!remaining.length && !unresolved.length) {
       return {
         observation, coverage: settled, attempts, consistencyModel: CONSISTENCY_MODEL,
+        degraded: degradedSummary(storeOutcomes),
         freshness: await measureFreshness({ closingObservation, observation }),
       };
     }
@@ -343,6 +372,45 @@ export async function acquireSealedGeneration({ maxAttempts = 3, assetsDir = nul
   fail(`sealed generation incomplete after ${maxAttempts} acquisition attempt(s): `
     + `${last.remainingArtifacts ?? 'unknown'} artifact(s) and ${last.unresolvedSources ?? 'unknown'} `
     + 'eligible source(s) remain unresolved against the sealed manifest');
+}
+
+function recordStoreOutcomes(storeOutcomes, reconciliation) {
+  for (const { store, carry } of reconciliation?.carried || []) storeOutcomes[store.toLowerCase()] = { carry };
+  for (const { store, failure } of reconciliation?.missing || []) storeOutcomes[store.toLowerCase()] = { failure };
+  for (const { store, integrity } of reconciliation?.integrityFailures || []) storeOutcomes[store.toLowerCase()] = { integrity };
+}
+
+export function degradedSummary(storeOutcomes) {
+  const entries = Object.entries(storeOutcomes || {}).sort(([a], [b]) => a.localeCompare(b));
+  return {
+    carried: entries.filter(([, outcome]) => outcome.carry).map(([store, outcome]) => ({ store, ...outcome.carry })),
+    missing: entries.filter(([, outcome]) => outcome.failure).map(([store, outcome]) => ({ store, ...outcome.failure })),
+  };
+}
+
+/**
+ * Fail the generation the moment isolation stops being the right answer, BEFORE pruning and the
+ * ~22-minute aggregate rebuild are spent on it:
+ *  - any integrity failure (carried bytes that no longer match the seed ledger, or a same-commit
+ *    rebuild that failed) -- such a row is FAILED, and FAILED is never shippable, so no bound can
+ *    admit it;
+ *  - more carried + missing stores than max(3, 5% of eligible) -- the failure is systemic, and
+ *    publishing around it would hide a forge or network regression.
+ */
+export function assertIsolatedFailures({ coverage, storeOutcomes }) {
+  const outcomes = Object.entries(storeOutcomes || {});
+  const integrity = outcomes.filter(([, outcome]) => outcome.integrity);
+  if (integrity.length) {
+    fail(`integrity failure in ${integrity.length} store(s): `
+      + `${integrity.map(([store, outcome]) => `${store} (${outcome.integrity})`).join('; ')} -- the generation fails`);
+  }
+  const eligible = (coverage?.rows || []).filter((row) => row.kind === 'repository' && row.disposition === 'eligible').length;
+  const isolated = outcomes.length;
+  const bound = degradedBound(eligible);
+  if (isolated > bound) {
+    fail(`systemic failure: ${isolated} of ${eligible} eligible store(s) failed to refresh `
+      + `(${outcomes.map(([store]) => store).join(', ')}); the bound is max(3, 5% of eligible) = ${bound} -- the generation fails`);
+  }
 }
 
 /**
@@ -369,6 +437,12 @@ export function summarizeReconciliation(reconciliation) {
     refreshed: across('refreshed'),
     pruned: across('pruned'),
     rebuilt: across('rebuilt'),
+    // ADR-0091 D5: the stores this generation carries (STALE) or lacks (MISSING) after an isolated
+    // refresh failure. Empty lists on an all-CURRENT generation.
+    degraded: {
+      carried: reconciliation.degraded?.carried || [],
+      missing: reconciliation.degraded?.missing || [],
+    },
   };
 }
 
@@ -385,7 +459,7 @@ function checked(run, command, args, options = {}) {
   return result;
 }
 
-function defaultRunAsync(command, args, options = {}) {
+export function defaultRunAsync(command, args, options = {}) {
   return new Promise((resolve) => {
     const inherited = options.stdio === 'inherit';
     const child = spawn(command, args, { ...options, encoding: undefined,
@@ -399,15 +473,6 @@ function defaultRunAsync(command, args, options = {}) {
     child.on('error', (error) => resolve({ status: null, error, stdout, stderr }));
     child.on('close', (status) => resolve({ status, stdout, stderr }));
   });
-}
-
-async function checkedAsync(run, command, args, options = {}) {
-  const result = await run(command, args, options) || {};
-  if (result.error || result.status !== 0) {
-    const detail = String(result.stderr || result.stdout || result.error?.message || `exit ${result.status}`).trim();
-    fail(`${command} ${args.join(' ')} failed${detail ? ` (${detail})` : ''}`);
-  }
-  return result;
 }
 
 const storeArtifacts = (store) => STORE_ARTIFACT_SUFFIXES.map((suffix) => `${store}${suffix}`);
@@ -505,6 +570,81 @@ function validateWorkerOutput({ output, item }) {
   return { ...payload, receiptSha256: crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'), output };
 }
 
+// ADR-0091 D5: the commit date of the bytes a carried store keeps, when the PREVIOUS generation's
+// sealed coverage proves it. A row whose observed upstream SHA IS the carried commit dates that exact
+// commit; a row that was itself carried passes its own carriedCommittedAt on. Anything else -- no
+// prior coverage (the bootstrap lineage), an invalid one, a different commit -- is null, never
+// estimated (D7.1 reads this for `oldestCarried`).
+export function readPriorCoverage(assetsDir) {
+  const file = path.join(path.resolve(assetsDir || ''), 'CORPUS-COVERAGE.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    const coverage = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return coverage?.kind === 'ruvnet-brain-corpus-coverage' && validateCoverageLedger(coverage).valid ? coverage : null;
+  } catch {
+    return null;
+  }
+}
+
+export function carriedCommittedAt({ priorCoverage, store, sourceCommit }) {
+  const folded = String(store || '').toLowerCase();
+  const commit = String(sourceCommit || '').toLowerCase();
+  const row = (priorCoverage?.rows || []).find((candidate) => candidate?.kind === 'repository'
+    && String(candidate?.artifact?.store || '').toLowerCase() === folded);
+  const iso = (value) => (typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null);
+  if (!row || !HEX40.test(commit)) return null;
+  if (String(row.upstream?.sha || '').toLowerCase() === commit) return iso(row.upstream?.committedAt);
+  if (String(row.carry?.carriedSourceCommit || '').toLowerCase() === commit) return iso(row.carry?.carriedCommittedAt);
+  return null;
+}
+
+// ADR-0091 D5: what a store whose refresh FAILED becomes. planReconciliation's byte check never
+// covers a store it plans (it runs only when sourceCommit already equals upstream), so the seed
+// bytes are re-hashed HERE before they may stand in for the missed refresh. The ledger binds one file
+// per store (the .big.rvf: file, bytes, sha256); the rest of the family must be present as regular
+// files. The seed archive itself was digest-verified on download (assertBootstrapIdentity).
+export function dispositionForFailedStore({ assetsDir, ledger, item, attempts, reason, priorCoverage = null }) {
+  const assets = path.resolve(assetsDir || '');
+  const generation = Object.entries(ledger?.stores || {})
+    .find(([name]) => name.toLowerCase() === item.store.toLowerCase())?.[1] || null;
+  if (!generation) return { store: item.store, failure: { reason, attempts } };
+  const carried = String(generation.sourceCommit || '').toLowerCase();
+  if (!HEX40.test(carried)) {
+    return { store: item.store, integrity: 'carried bytes have no exact 40-hex ledger sourceCommit to carry' };
+  }
+  if (carried === item.upstreamSha) {
+    // Planned for a policy or receipt reason at the SAME commit (a capability-only clean rebuild, or
+    // seed bytes that already failed the receipt check): the seed bytes are exactly what the rebuild
+    // was meant to replace, so they cannot stand in for it.
+    return { store: item.store, integrity: 'the refresh was a same-commit rebuild the seed bytes cannot stand in for' };
+  }
+  const regular = (name) => {
+    try { const stat = fs.lstatSync(path.join(assets, name)); return stat.isFile() && !stat.isSymbolicLink(); }
+    catch { return false; }
+  };
+  const rvf = `${item.store}.big.rvf`;
+  const bound = generation.file === rvf && regular(rvf)
+    && generation.bytes === fs.statSync(path.join(assets, rvf)).size
+    && generation.sha256 === sha256File(path.join(assets, rvf))
+    && REQUIRED_STORE_ARTIFACT_SUFFIXES.every((suffix) => regular(`${item.store}${suffix}`));
+  if (!bound) return { store: item.store, integrity: 'carried bytes differ from the seed generation ledger' };
+  return { store: item.store, carry: {
+    reason,
+    carriedSourceCommit: carried,
+    missedUpstream: item.upstreamSha,
+    attempts,
+    carriedCommittedAt: carriedCommittedAt({ priorCoverage, store: item.store, sourceCommit: carried }),
+  } };
+}
+
+// Only a TRANSIENT failure is retried, exactly once, in a fresh directory: `<store>-retry1`. The first
+// attempt's directory is never reused -- a clone or a half-written worker output from the failed
+// attempt must not be mistaken for the retry's own (the pre-D5 path collided).
+export function workerRootFor(workspace, store, retry) {
+  return path.join(workspace, 'workers', retry === 0 ? store : `${store}-retry${retry}`);
+}
+export const MAX_TRANSIENT_RETRIES = 1;
+
 export async function executeReconciliation({
   plan,
   assetsDir,
@@ -513,6 +653,8 @@ export async function executeReconciliation({
   run = defaultRunAsync,
   concurrency = 5,
   signal,
+  priorCoverage = null,
+  log = (line) => console.log(line),
 }) {
   if (!Array.isArray(plan) || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 10) {
     fail('reconciliation plan or worker concurrency is invalid');
@@ -532,50 +674,94 @@ export async function executeReconciliation({
   const lowerStores = orderedPlan.map(({ store }) => store.toLowerCase());
   if (new Set(lowerStores).size !== lowerStores.length) fail('reconciliation plan has duplicate or case-fold-colliding stores');
 
-  // Step 4, required proof 4 (2026-09-13): every worker in this pool shares ONE internal
-  // AbortController. Before this, `Promise.all` over the fixed-size worker pool below rejected as
-  // soon as ANY lane's `worker()` threw -- but the OTHER lanes kept running their own `while` loop
-  // completely unobserved: still cloning, still spawning forge-refresh, with nobody left awaiting
-  // them once the outer Promise.all had already settled. A later failure (or success) in one of
-  // those orphaned lanes could then surface as an unhandled rejection, or simply keep doing
-  // unnecessary work after the round was already lost. Now: the first failure aborts the shared
-  // signal, every lane observes it (both at its own loop-top and via the signal threaded into every
-  // child-process spawn below) and returns promptly, and `Promise.all` -- which no lane's promise
-  // ever rejects out of directly -- only resolves once every lane has actually stopped. Only then do
-  // we throw the FIRST real error (an aborted sibling's own error is discarded, never overwrites it).
-  // An externally supplied `signal` (a caller discarding this whole round) aborts the same
-  // controller, so both cancellation paths join through the one place.
+  // ADR-0091 D5: ONE store failing no longer aborts the round. Before D5 the first worker error
+  // aborted every sibling (2 of 9 corpus runs died that way: one deterministic `ruvector` QA miss
+  // threw away 93 other stores' refreshes). Now each store's failure is recorded and its lane moves
+  // on; the shared AbortController below exists ONLY for an externally supplied `signal` -- a caller
+  // discarding the whole round -- which still stops and joins every lane (required proof 4).
   const controller = new AbortController();
   if (signal) {
     if (signal.aborted) controller.abort(signal.reason);
     else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
   }
 
-  const worker = async (item) => {
+  const stage = async (item, name, classify, command, args, options = {}) => {
+    const result = await run(command, args, { ...options, signal: controller.signal }) || {};
+    if (controller.signal.aborted) throw abortError(controller.signal);
+    if (result.error || result.status !== 0) {
+      const detail = String(result.stderr || result.stdout || result.error?.message || `exit ${result.status}`).trim().slice(0, 400);
+      throw new StoreWorkerError({ store: item.store, stage: name, failureClass: classify(result), detail });
+    }
+    return result;
+  };
+  const transient = () => FAILURE_CLASS.TRANSIENT;
+  // forge-refresh's exit status is the structured reason: CORPUS_QA_FAILED_EXIT means corpus-qa refused
+  // the candidate (deterministic, never retried); a spawn error is runner I/O (transient); any other
+  // non-zero exit is a build failure (not retried: a retry is a full re-embed with no reason to differ).
+  const forgeClass = (result) => (result.status === CORPUS_QA_FAILED_EXIT ? FAILURE_CLASS.QA
+    : result.error ? FAILURE_CLASS.TRANSIENT : FAILURE_CLASS.BUILD);
+
+  const worker = async (item, retry) => {
     if (controller.signal.aborted) throw abortError(controller.signal);
     if (!SAFE_STORE.test(item.store) || !HEX40.test(item.upstreamSha) || !repositorySlug(item.url)) {
-      fail(`unsafe reconciliation item for ${item?.store || item?.name || 'unknown store'}`);
+      throw new StoreWorkerError({ store: item?.store || item?.name || 'unknown store', stage: 'plan item',
+        failureClass: FAILURE_CLASS.INTEGRITY, detail: 'unsafe reconciliation item' });
     }
-    const workerRoot = path.join(workspace, 'workers', item.store);
+    const workerRoot = workerRootFor(workspace, item.store, retry);
+    if (fs.existsSync(workerRoot)) {
+      throw new StoreWorkerError({ store: item.store, stage: 'worker directory', failureClass: FAILURE_CLASS.INTEGRITY,
+        detail: 'a fresh worker directory already exists' });
+    }
     const cloneDir = path.join(workerRoot, 'clone');
     const output = path.join(workerRoot, 'assets');
-    fs.mkdirSync(workerRoot, { recursive: true });
-    seedWorkerAssets({ assets, output, store: item.store, ledger: canonicalLedger, source: canonicalSource });
-    await checkedAsync(run, 'git', ['clone', '--no-checkout', '--filter=blob:none', item.url, cloneDir], { signal: controller.signal });
-    await checkedAsync(run, 'git', ['-C', cloneDir, 'fetch', '--depth=1', 'origin', item.upstreamSha], { signal: controller.signal });
-    await checkedAsync(run, 'git', ['-C', cloneDir, 'checkout', '--detach', 'FETCH_HEAD'], { signal: controller.signal });
-    const head = await checkedAsync(run, 'git', ['-C', cloneDir, 'rev-parse', 'HEAD'], { signal: controller.signal });
-    if (String(head.stdout || '').trim().toLowerCase() !== item.upstreamSha) {
-      fail(`${item.store}: fresh clone did not resolve the exact upstream SHA`);
+    try {
+      fs.mkdirSync(workerRoot, { recursive: true });
+      seedWorkerAssets({ assets, output, store: item.store, ledger: canonicalLedger, source: canonicalSource });
+    } catch (error) {
+      // An errno (disk, file table) is runner I/O; our own refusal is an integrity failure.
+      throw new StoreWorkerError({ store: item.store, stage: 'worker seed copy',
+        failureClass: typeof error?.code === 'string' ? FAILURE_CLASS.TRANSIENT : FAILURE_CLASS.INTEGRITY, detail: error.message });
     }
-    await checkedAsync(run, process.execPath, [forge, '--repo', cloneDir, '--out', output, '--name', item.store,
+    await stage(item, 'git clone', transient, 'git', ['clone', '--no-checkout', '--filter=blob:none', item.url, cloneDir]);
+    await stage(item, 'git fetch', transient, 'git', ['-C', cloneDir, 'fetch', '--depth=1', 'origin', item.upstreamSha]);
+    await stage(item, 'git checkout', transient, 'git', ['-C', cloneDir, 'checkout', '--detach', 'FETCH_HEAD']);
+    const head = await stage(item, 'git rev-parse', transient, 'git', ['-C', cloneDir, 'rev-parse', 'HEAD']);
+    if (String(head.stdout || '').trim().toLowerCase() !== item.upstreamSha) {
+      throw new StoreWorkerError({ store: item.store, stage: 'exact-sha checkout', failureClass: FAILURE_CLASS.INTEGRITY,
+        detail: 'fresh clone did not resolve the exact upstream SHA' });
+    }
+    await stage(item, 'forge-refresh', forgeClass, process.execPath, [forge, '--repo', cloneDir, '--out', output, '--name', item.store,
       ...(FULL_HINTS[item.store] ? ['--full', FULL_HINTS[item.store]] : []),
       ...(KEEP_DIRS[item.store] ? ['--keep', KEEP_DIRS[item.store]] : []),
-    ], { stdio: 'inherit', env: { ...process.env, RUVNET_BIG_SHARDS: '1' }, signal: controller.signal });
-    return validateWorkerOutput({ output, item });
+    ], { stdio: 'inherit', env: { ...process.env, RUVNET_BIG_SHARDS: '1' } });
+    try {
+      return validateWorkerOutput({ output, item });
+    } catch (error) {
+      throw new StoreWorkerError({ store: item.store, stage: 'worker output validation', failureClass: FAILURE_CLASS.INTEGRITY,
+        detail: error.message });
+    }
   };
 
-  const results = new Array(orderedPlan.length);
+  const runStore = async (item) => {
+    let lastError = null;
+    let attempts = 0;
+    for (let retry = 0; retry <= MAX_TRANSIENT_RETRIES; retry += 1) {
+      attempts += 1;
+      try {
+        return { ok: true, attempts, result: await worker(item, retry) };
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        lastError = error;
+        const retrying = isRetryable(error) && retry < MAX_TRANSIENT_RETRIES;
+        log(`[corpus-reconcile] ${item.store}: attempt ${attempts} failed -- ${error.message}`
+          + (retrying ? '; retrying once in a fresh worker directory' : '; not retried'));
+        if (!retrying) break;
+      }
+    }
+    return { ok: false, attempts, error: lastError };
+  };
+
+  const outcomes = new Array(orderedPlan.length);
   let next = 0;
   let firstError = null;
   await Promise.all(Array.from({ length: Math.min(concurrency, orderedPlan.length) }, async () => {
@@ -583,17 +769,35 @@ export async function executeReconciliation({
       if (controller.signal.aborted) return;
       const index = next++;
       try {
-        results[index] = await worker(orderedPlan[index]);
+        outcomes[index] = await runStore(orderedPlan[index]);
       } catch (error) {
+        // Only an external cancellation reaches here; every lane is already observing the same signal.
         if (!firstError) firstError = error;
-        controller.abort(error);
         return;
       }
     }
   }));
   if (!firstError && controller.signal.aborted) firstError = abortError(controller.signal);
   if (firstError) throw firstError;
-  if (!results.length) return { refreshed: [], workers: [] };
+
+  const carried = [];
+  const missing = [];
+  const integrityFailures = [];
+  outcomes.forEach((outcome, index) => {
+    if (!outcome || outcome.ok) return;
+    const disposition = dispositionForFailedStore({ assetsDir: assets, ledger: canonicalLedger, item: orderedPlan[index],
+      attempts: outcome.attempts, reason: failureReason(outcome.error), priorCoverage });
+    if (disposition.carry) carried.push(disposition);
+    else if (disposition.failure) missing.push(disposition);
+    else integrityFailures.push(disposition);
+    log(`[corpus-reconcile] ${orderedPlan[index].store}: ${disposition.carry ? 'CARRIED at its verified seed bytes (STALE)'
+      : disposition.failure ? 'MISSING (no prior bytes)' : `INTEGRITY FAILURE (${disposition.integrity})`}`);
+  });
+  // The merge reads SUCCESSFUL results only. `outcomes` is indexed by plan position, so a failed
+  // store leaves a slot with no worker result; the pre-D5 merge read `result.files` off every slot.
+  const results = outcomes.filter((outcome) => outcome?.ok).map((outcome) => outcome.result);
+  const failed = { carried, missing, integrityFailures };
+  if (!results.length) return { refreshed: [], workers: [], ...failed };
 
   const merge = path.join(workspace, 'merge-candidate');
   fs.mkdirSync(merge);
@@ -629,7 +833,7 @@ export async function executeReconciliation({
     assertCapabilityOnlyStore(assets, store);
   }
   return { refreshed: results.map(({ store }) => store),
-    workers: results.map(({ output: _output, ...receipt }) => receipt) };
+    workers: results.map(({ output: _output, ...receipt }) => receipt), ...failed };
 }
 
 // syncCorpusInputs — Step 3 (2026-09-13): this used to ALSO sync public-prose inputs
@@ -677,7 +881,8 @@ async function observeSourceOnly({ owner, assetsDir }) {
 export async function acquireCorpusGeneration({ owner = 'ruvnet', assetsDir, workspaceDir,
   root = DEFAULT_ROOT, maxAttempts = 3, closingObservation = null,
   observe = null,
-  build = (observation) => buildCoverage({ owner, kbDir: assetsDir, policyDir: assetsDir, observation }),
+  build = (observation, storeOutcomes = null) => buildCoverage({ owner, kbDir: assetsDir, policyDir: assetsDir, observation,
+    storeOutcomes }),
   readLedger = () => readJson(path.join(path.resolve(assetsDir || ''), 'RVF-GENERATIONS.json'),
     'RVF generation ledger'),
   execute = executeReconciliation,
@@ -696,6 +901,14 @@ export async function acquireCorpusGeneration({ owner = 'ruvnet', assetsDir, wor
   rebuild = (coverage, observation, _attempt, capturedGists) => rebuildCorpusAggregates({
     assetsDir, observation, coverage, root, cache: capturedGists,
   }),
+  // The seed's knowledge inputs come from the evidence it carries (read FIRST: a seed without it --
+  // the pre-contract bootstrap -- always builds, and costs no second coverage measurement); tonight's
+  // from the coverage `build` measures off the sealed observation, plus this checkout's public prose.
+  unchanged = async (observation) => {
+    const seed = knowledgeFromSeed(assetsDir);
+    if (!seed) return { unchanged: false, reason: 'the seed carries no knowledge-input evidence' };
+    return compareKnowledgeInputs({ seed, tonight: await knowledgeFromCoverage(await build(observation, {}), root) });
+  },
 } = {}) {
   if (!assetsDir || !workspaceDir) fail('stable reconciliation requires explicit assets and workspace directories');
   const workspace = path.resolve(workspaceDir || '');
@@ -704,6 +917,8 @@ export async function acquireCorpusGeneration({ owner = 'ruvnet', assetsDir, wor
   assertPathNotOverlapping('reconciliation workspace directory', workspace, forbidden);
   assertPathNotOverlapping('reconciliation workspace directory', workspace,
     [{ label: 'the assets directory', dir: assetsDir }]);
+  // Read ONCE, before anything is rebuilt: the seed's own sealed coverage dates a carried store's bytes.
+  const priorCoverage = readPriorCoverage(assetsDir);
   return acquireSealedGeneration({
     maxAttempts,
     closingObservation,
@@ -712,11 +927,12 @@ export async function acquireCorpusGeneration({ owner = 'ruvnet', assetsDir, wor
     build,
     readLedger,
     execute: (plan, attempt) => execute({
-      plan, assetsDir, workspaceDir: path.join(workspace, `attempt-${attempt}`), root,
+      plan, assetsDir, workspaceDir: path.join(workspace, `attempt-${attempt}`), root, priorCoverage,
     }),
     prune,
     rebuild,
     preflight,
+    unchanged,
   });
 }
 
@@ -738,6 +954,8 @@ export async function reconcileAndPrepareCorpusCandidate({ assetsDir, workspaceD
   accuracyTimeoutMs = null,
   prepare = prepareCorpusCandidate } = {}) {
   const finalized = await reconcile({ owner, assetsDir, workspaceDir, root, maxAttempts });
+  // Nothing the corpus is built from changed since the seed: nothing to normalize, seal or measure.
+  if (finalized?.noChange === true) return { reconciliation: finalized, noChange: true, updaters: null, candidate: null };
   // Every shipped repository store needs a complete updater entry, and a seed that predates the
   // convention leaves inherited stores without one -- measured 2026-09-15: 100 of 194 repository
   // stores, none of them refreshed that run, which build-bundle rightly refused to ship. Normalize
@@ -803,8 +1021,7 @@ export function prepareCorpusCandidate({
   if (!coverage || coverage.kind !== 'ruvnet-brain-corpus-coverage' || !Array.isArray(coverage.rows)) {
     fail('prepareCorpusCandidate requires an already-measured coverage object; it never re-observes live sources');
   }
-  const blockers = coverage.rows.filter((row) => row.disposition === 'eligible' && row.status !== 'CURRENT');
-  if (blockers.length) fail(`strict coverage: ${blockers.length} eligible row(s) are not CURRENT`);
+  const degraded = assessCandidateCoverage(coverage);
   assertPathNotOverlapping('candidate output directory', candidate, forbiddenOutputRoots(sourceRoot));
   const buildScript = path.join(sourceRoot, 'scripts', 'build-bundle.mjs');
   const receiptScript = path.join(sourceRoot, 'scripts', 'corpus-candidate.mjs');
@@ -881,10 +1098,12 @@ export function prepareCorpusCandidate({
   // THE BLOCKING RETRIEVAL GATE (ADR-086 amendment 2026-09-15). Same placement and same discipline
   // as the C3 run above — the EXTRACTED final archive through the customer query path — but this is
   // the measurement that can refuse a candidate. It asks the 194 frozen human questions, one per
-  // repository, and fails on any error, any repository that returns nothing of its own, or any
-  // exact-file Hit@5 below the committed ratchet floor.
+  // repository, and fails on any error or any repository that returns nothing of its own. The
+  // exact-file Hit@5 floor is RECORDED in the report and never fails the CLI (ADR-0091 D7.6).
+  // `--coverage` is this candidate's sealed observation: a fixture repository with no row in it is
+  // retired (D7.2) instead of asked a question it has no store to answer.
   const recallReportFile = `${bundleFile}.recall.json`;
-  checked(run, process.execPath, [recallScript, '--bundle', bundleFile, '--out', recallReportFile],
+  checked(run, process.execPath, [recallScript, '--bundle', bundleFile, '--out', recallReportFile, '--coverage', policy],
     { stdio: 'inherit' });
   // The candidate receipt is derived ENTIRELY from the sealed bundle's own bytes plus the detached,
   // digest-bound reports — the separate assets/policy directory used to build it is no longer an
@@ -894,15 +1113,48 @@ export function prepareCorpusCandidate({
     : [];
   checked(run, process.execPath, [receiptScript, '--bundle', bundleFile,
     '--receipt', receipt, '--builder-source-sha', builderSha,
-    '--accuracy-report', accuracyReportFile, '--recall-report', recallReportFile,
+    '--accuracy-report', accuracyReportFile, '--recall-report', recallReportFile, '--coverage', policy,
     ...bootstrapArgs], { stdio: 'inherit' });
   checked(run, process.execPath, [receiptScript, '--verify', '--bundle', bundleFile,
     '--receipt', receipt, '--accuracy-report', accuracyReportFile,
-    '--recall-report', recallReportFile], { stdio: 'inherit' });
+    '--recall-report', recallReportFile, '--coverage', policy], { stdio: 'inherit' });
   return {
     bundleFile, receiptFile: receipt, coverageFile: policy,
-    accuracyReportFile, accuracyOracleFile: accuracyOracle, recallReportFile,
+    accuracyReportFile, accuracyOracleFile: accuracyOracle, recallReportFile, degraded,
   };
+}
+
+/**
+ * ADR-0091 D5 -- the gate that replaced "every eligible row is CURRENT". An eligible row passes when
+ * it is CURRENT, or when it is a repository row the shipped validator itself accepts
+ * (eligibleRepositoryStanding: STALE with a verified `carry`, MISSING with a `failure`). Everything
+ * else -- a STALE/MISSING row with no record, FAILED, UNVERIFIED, any non-CURRENT gist -- still fails
+ * closed, and so does a count of carried + missing stores above max(3, 5% of eligible).
+ */
+export function assessCandidateCoverage(coverage) {
+  const eligible = coverage.rows.filter((row) => row.disposition === 'eligible');
+  const carried = [];
+  const missing = [];
+  const blockers = [];
+  for (const row of eligible) {
+    const standing = row.kind === 'repository' ? eligibleRepositoryStanding(row)
+      : row.status === 'CURRENT' && row.carry === undefined && row.failure === undefined ? 'shipped' : null;
+    if (standing === null) blockers.push(row);
+    else if (row.carry) carried.push({ store: row.artifact.store, ...row.carry });
+    else if (row.failure) missing.push({ store: row.artifact.store, ...row.failure });
+  }
+  if (blockers.length) {
+    fail(`strict coverage: ${blockers.length} eligible row(s) are not CURRENT and carry no verified carry/failure record `
+      + `(${blockers.slice(0, 5).map((row) => `${row.artifact?.store || row.key}:${row.status}`).join(', ')}`
+      + `${blockers.length > 5 ? ', ...' : ''})`);
+  }
+  const repositories = eligible.filter((row) => row.kind === 'repository').length;
+  const bound = degradedBound(repositories);
+  if (carried.length + missing.length > bound) {
+    fail(`degraded coverage: ${carried.length} carried + ${missing.length} missing store(s) exceed `
+      + `max(3, 5% of ${repositories} eligible) = ${bound}`);
+  }
+  return { carried, missing, bound, eligibleRepositories: repositories };
 }
 
 function arg(argv, name, fallback = null) {
@@ -936,7 +1188,11 @@ export async function main(argv = process.argv.slice(2), {
     ? Number(arg(argv, '--accuracy-sample-per-partition')) : null;
   const accuracyTimeoutMs = arg(argv, '--accuracy-timeout-ms') ? Number(arg(argv, '--accuracy-timeout-ms')) : null;
 
-  const bootstrap = assertBootstrapIdentity({ archiveFile, tag: seedTag, sha256: seedSha256, allowPinnedTag: process.argv.includes('--allow-pinned-seed-tag') });
+  // `--no-change-out <file>`: always written (true or false) once reconciliation returns, so
+  // corpus-seed.yml never has to infer a no-change night from a missing file.
+  const noChangeOut = arg(argv, '--no-change-out');
+  // The argv this main() was HANDED, never process.argv: an injected invocation must mean what it says.
+  const bootstrap = assertBootstrapIdentity({ archiveFile, tag: seedTag, sha256: seedSha256, allowPinnedTag: argv.includes('--allow-pinned-seed-tag') });
   if (fs.existsSync(assetsDir) && fs.readdirSync(assetsDir).length) fail(`bootstrap assets directory is not empty (${assetsDir})`);
   fs.mkdirSync(path.dirname(assetsDir), { recursive: true });
   const extractParent = fs.mkdtempSync(path.join(path.dirname(assetsDir), '.corpus-seed-extract-'));
@@ -958,12 +1214,35 @@ export async function main(argv = process.argv.slice(2), {
   fs.rmSync(extractParent, { recursive: true, force: true });
   syncCorpusInputs({ root, assetsDir });
   const bootstrapIdentity = { tag: bootstrap.tag, sha256: bootstrap.sha256, privateFenceEvidence: seedPrivateFenceEvidence(assetsDir) };
-  const { reconciliation, candidate } = await reconcileAndPrepare({
+  const { reconciliation, candidate, noChange = false } = await reconcileAndPrepare({
     assetsDir, workspaceDir, root, owner, builderSha, candidateDir, receiptFile, coverageFile, bootstrapIdentity,
     accuracyOracleFile, accuracyStores, accuracySample, accuracySamplePerPartition, accuracyTimeoutMs,
   });
+  if (noChangeOut) {
+    fs.mkdirSync(path.dirname(path.resolve(noChangeOut)), { recursive: true });
+    fs.writeFileSync(path.resolve(noChangeOut), `${JSON.stringify({
+      noChange: noChange === true,
+      knowledgeInputSha256: noChange === true ? reconciliation?.knowledgeInput?.tonightSha256 ?? null : null,
+      observationSha256: reconciliation?.observation?.observationSha256 ?? null,
+    })}\n`);
+  }
+  if (noChange === true) {
+    stdout.write(`${JSON.stringify({ ok: true, noChange: true, seedTag, seedSha256,
+      knowledgeInput: reconciliation?.knowledgeInput ?? null }, null, 2)}\n`);
+    return 0;
+  }
   const { plan } = summarizeReconciliation(reconciliation);
-  stdout.write(`${JSON.stringify({ ok: true, seedTag, seedSha256, plan, reconciliation, ...candidate }, null, 2)}\n`);
+  const degraded = candidate.degraded || { carried: [], missing: [] };
+  const isDegraded = degraded.carried.length + degraded.missing.length > 0;
+  const publication = isDegraded ? degradedPublication() : { allowed: true, reason: 'every eligible row is CURRENT' };
+  stdout.write(`${JSON.stringify({ ok: publication.allowed, seedTag, seedSha256, plan, reconciliation, ...candidate,
+    degraded: { ...degraded, publishable: publication.allowed, reason: publication.reason } }, null, 2)}\n`);
+  if (!publication.allowed) {
+    stderr.write(`::warning title=Degraded corpus generation sealed, not published::${degraded.carried.length} carried `
+      + `(${degraded.carried.map((row) => row.store).join(', ') || 'none'}), ${degraded.missing.length} missing `
+      + `(${degraded.missing.map((row) => row.store).join(', ') || 'none'}); ${publication.reason}\n`);
+    return DEGRADED_UNPUBLISHED_EXIT;
+  }
   return 0;
 }
 

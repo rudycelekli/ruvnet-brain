@@ -141,7 +141,10 @@ describe('protected release rail', () => {
 
   it('derives baseline and candidate retrieval inputs before sealing the payload', () => {
     const source = read('.github/workflows/ci.yml');
-    expect(source.match(/node scripts\/public-verification-inputs\.mjs/g)?.length || 0).toBeGreaterThanOrEqual(2);
+    // The observe-baseline half now runs inside scripts/code-release-corpus.mjs on BOTH assembly paths
+    // (ADR-0091 D6); the candidate-input derivation stays in the workflow.
+    expect(source.match(/node scripts\/public-verification-inputs\.mjs/g)?.length || 0).toBeGreaterThanOrEqual(1);
+    expect(read('scripts/code-release-corpus.mjs')).toContain("script('public-verification-inputs.mjs'), 'observe-baseline'");
     expect(source.indexOf('Build the immutable knowledge bundle exactly once'))
       .toBeLessThan(source.indexOf('node scripts/public-verification-inputs.mjs'));
     expect(source.indexOf('node scripts/public-verification-inputs.mjs'))
@@ -160,6 +163,9 @@ describe('protected release rail', () => {
     expect(source).toContain("-type f -name '*.big.rvf'");
     expect(source).toContain("! -path '*/__MACOSX/*' ! -name '._*'");
     expect(source).toContain("LC_ALL=C sort -u");
-    expect(source).toContain('node scripts/rvf-index-audit.mjs --dir "${asset_dirs[0]}"');
+    // The index repair now runs inside the legacy (bootstrap-only) branch of the orchestrator, on the
+    // directory this selection found (ADR-0091 D6).
+    expect(source).toContain('--assets "${asset_dirs[0]}"');
+    expect(read('scripts/code-release-corpus.mjs')).toContain("script('rvf-index-audit.mjs'), '--dir', assets, '--repair'");
   });
 });
