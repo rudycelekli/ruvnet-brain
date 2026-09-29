@@ -133,8 +133,21 @@ const checks = [
     } },
 
   // C — one release path
-  { id: 'C1', area: 'release', scope: 'repo', title: 'Unattended corpus promotion stays disarmed until a code release is install-verified',
-    run: () => ({ ok: !tracked.includes('data/approved-runtime.json'), detail: tracked.includes('data/approved-runtime.json') ? 'data/approved-runtime.json present (arms the 07:17 UTC nightly)' : 'absent' }) },
+  // ADR-0091 D3: the approved runtime is RESOLVED at run time from the newest install-verified code
+  // release (its signed public-verification aggregate), never committed; the nightly is armed only by
+  // the CORPUS_NIGHTLY repository variable. A committed pin, or a workflow still reading one, is drift.
+  { id: 'C1', area: 'release', scope: 'repo', title: 'Corpus promotion resolves its runtime pin from an install-verified release at run time; nothing commits one',
+    run: () => {
+      const problems = [];
+      if (tracked.includes('data/approved-runtime.json')) problems.push('data/approved-runtime.json is committed (the pin must be resolved, never committed)');
+      for (const w of workflows) if (read(w).includes('data/approved-runtime.json')) problems.push(`${w} still reads data/approved-runtime.json`);
+      const dispatcher = read('.github/workflows/corpus-nightly-dispatch.yml');
+      if (!/vars\.CORPUS_NIGHTLY/.test(dispatcher)) problems.push('corpus-nightly-dispatch.yml is not gated on the CORPUS_NIGHTLY repository variable');
+      for (const w of ['corpus-nightly-dispatch.yml', 'protected-release.yml', 'corpus-seed.yml']) {
+        if (!read(`.github/workflows/${w}`).includes('approved-runtime.mjs --resolve')) problems.push(`${w} does not resolve the approved runtime`);
+      }
+      return none(problems);
+    } },
   { id: 'C2', area: 'release', scope: 'repo', title: 'Every scheduled workflow pages the phone on failure',
     run: () => {
       const alerts = read('.github/workflows/ntfy-alerts.yml');

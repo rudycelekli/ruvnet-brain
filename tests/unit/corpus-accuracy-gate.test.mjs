@@ -23,7 +23,7 @@ import {
 import { createCorpusReceipt, verifyCorpusReceipt } from '../../scripts/corpus-candidate.mjs';
 import {
   accuracyOracle, accuracyReportFor, buildAssets, fixtureReleaseRoot, recallReportFor, seal,
-  sealedCorpusBundle, writeAccuracyReport, SOURCE_COMMIT,
+  sealedCorpusBundle, writeAccuracyReport, writeCoverageFor, SOURCE_COMMIT,
 } from '../helpers/corpus-seed-fixture.mjs';
 import { evaluateGate, tally } from '../../scripts/oracle/repo-recall.mjs';
 
@@ -637,9 +637,11 @@ process.exit(0);
       RUVNET_GH_COMMAND: process.execPath,
       RUVNET_GH_SCRIPT: gh,
     };
+    const coverageFile = path.join(dir, 'source-coverage.json');
+    await writeCoverageFor(receipt, coverageFile);
     const argv = [
       '--corpus-seed', '--corpus-tag', `corpus-sha256-${receipt.archive.sha256}`,
-      '--corpus-bundle', bundle, '--corpus-receipt', receiptFile,
+      '--corpus-bundle', bundle, '--corpus-receipt', receiptFile, '--corpus-coverage', coverageFile,
       '--target', HEAD, '--repo', 'stuinfla/ruvnet-brain',
     ];
     const run = ({ release = fixtureRoot.release } = {}) => spawnSync(

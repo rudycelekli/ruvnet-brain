@@ -1,6 +1,6 @@
 # Contributing to RuvNet Brain — the one rulebook
 
-Updated: 2026-09-26
+Updated: 2026-09-28
 Created: 2026-07-07
 
 This file is the **only** place that says how to version, release, update the knowledge corpus,
@@ -16,7 +16,7 @@ instructions. `npm run single-source:check` fails CI if a second, conflicting in
 | Set the version | `npm run version:set -- X.Y.Z` (first commit of the release branch) | `npm run version:check` exits 0 |
 | Release code | Preflight → fast-forward `main` → dispatch `protected-release.yml mode=code` → owner approves the `Production – ruvnet-brain` deployment | Terminal receipt `install-verified` on Linux, macOS, Windows; npm `latest` = GitHub `releases/latest` = `main` |
 | Build the customer corpus | CI only: `corpus-seed.yml` → `scripts/corpus-reconcile.mjs` | Sealed candidate + receipt artifact |
-| Publish the corpus | `protected-release.yml mode=corpus` (nightly dispatcher), armed only while `data/approved-runtime.json` pins an install-verified code release | `corpus-sha256-*` release promoted to `releases/latest` |
+| Publish the corpus | `protected-release.yml mode=corpus` (nightly dispatcher), armed unless repository variable `CORPUS_NIGHTLY` is `off` (the owner's kill switch) **and** the newest code release is `install-verified` (resolved at run time, `scripts/approved-runtime.mjs --resolve`; never a committed file, never a fallback to an older release); the corpus is built at that release's source commit, and `main` being ahead of it does not matter; a night with no upstream change publishes nothing | `corpus-sha256-*` release promoted to `releases/latest` |
 | Update a user's machine | One owner per machine: the Brain's scheduler (`npx ruvnet-brain --enable-nightly`) **or** agentic-kit (`ak sync`) — never both | `SOURCE.json` `releaseTag` equals the plugin version; latest `~/.cache/ruvnet-brain/refresh-runs/*.json` is PASS |
 
 Nothing else publishes. `scripts/release-authority.mjs` fails CI if any file other than
@@ -66,10 +66,22 @@ captured by `scripts/gist-receipts.mjs` (the single gist pipeline). The job need
 secret `RUVNET_GISTS_TOKEN` (a GitHub token with no scopes) — without it, gist listing falls back
 to anonymous API calls and is rate-limited.
 
-**Published nightly, only when armed.** `corpus-nightly-dispatch.yml` (07:17 UTC) dispatches
-`protected-release.yml mode=corpus`, which signs and promotes a `corpus-sha256-*` release. It stands
-down unless `data/approved-runtime.json` exists; create that pin only after a code release reached
-`install-verified` (`node scripts/approved-runtime.mjs … --out data/approved-runtime.json`).
+**Published nightly.** `corpus-nightly-dispatch.yml` (07:17 UTC) dispatches
+`protected-release.yml mode=corpus`, which signs and promotes a `corpus-sha256-*` release. It is armed
+unless the repository variable `CORPUS_NIGHTLY` is exactly `off` (the owner's kill switch; flipping it
+needs no code release) and it stands down (green, not failed) until an approved runtime resolves. A
+night whose upstream inputs are unchanged since the newest generation ends `no-change` and publishes
+nothing. `corpus-watchdog.yml` (17:17 UTC) turns red, and pages through `ntfy-alerts`, when no night has
+ended `published` or `no-change` in 48 hours, so a silent stand-down cannot go unnoticed.
+The approved runtime is never committed: `node scripts/approved-runtime.mjs --resolve` takes the newest
+`vX.Y.Z` release only, requires its signed `public-verification-aggregate.json` to verify against
+`keys/ruvnet-brain-signing.pub.pem`, and rebuilds the runtime pin from that release's own zip
+(ADR-0091 D3). It never falls back to an older release: promoting an older runtime over the live code
+release breaks fresh installs. No aggregate yet = the nightly stands down (exit 3); an aggregate that
+does not verify = a loud failure. The corpus is built at that release's source commit (`main` may be ahead of it), its
+executables are the install-verified ones byte for byte, and if a newer code release appears before the
+corpus publishes, the night ends `superseded` (a warning, not a failure). Never commit `data/approved-runtime.json`; `single-source:check`
+C1 fails if one appears.
 
 **Local ingestion is for development.** `node scripts/ingest-repo.mjs --name <repo> [--org <org>]`
 makes a repo searchable on *this* machine immediately. It never reaches users; a repo reaches users

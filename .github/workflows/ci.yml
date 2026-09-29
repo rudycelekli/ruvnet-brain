@@ -38,8 +38,11 @@ jobs:
 
   # ADR-058 D1: the source-grounding guarantee must execute on a runner that has the exact
   # candidate's Brain and every embedder its RVF sidecars require.  A REQUIRE_BRAIN token in a
-  # comment is not evidence; this job downloads the checked-in corpus seed, warms the same cache
+  # comment is not evidence; this job downloads the resolved corpus seed, warms the same cache
   # inspected by plugin/test/run-tests.mjs, and runs the live MCP boundary with the hard flag.
+  # ADR-0091 D6: the seed is resolved exactly as release-qe resolves it (corpus-next-seed.mjs
+  # --require-coverage: the newest compatible generation, else the committed bootstrap), so this
+  # proof runs against the corpus the release actually ships, never the five-week-stale bootstrap.
   warm-brain:
     name: warm-brain
     needs: candidate-preflight
@@ -64,12 +67,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          seed_tag="$(node -p "require('./data/corpus-seed.json').tag")"
-          seed_asset="$(node -p "require('./data/corpus-seed.json').asset")"
-          seed_sha="$(node -p "require('./data/corpus-seed.json').sha256")"
-          seed_bytes="$(node -p "require('./data/corpus-seed.json').bytes")"
           seed_dir="$RUNNER_TEMP/require-brain-seed"
           mkdir -p "$seed_dir/extracted"
+          node scripts/corpus-next-seed.mjs --repo "$GITHUB_REPOSITORY" --require-coverage --out "$seed_dir/resolved-seed.json"
+          seed_tag="$(node -p "require(process.argv[1]).tag" "$seed_dir/resolved-seed.json")"
+          seed_asset="$(node -p "require(process.argv[1]).asset" "$seed_dir/resolved-seed.json")"
+          seed_sha="$(node -p "require(process.argv[1]).sha256" "$seed_dir/resolved-seed.json")"
+          seed_bytes="$(node -p "require(process.argv[1]).bytes" "$seed_dir/resolved-seed.json")"
           gh release download "$seed_tag" --repo "$GITHUB_REPOSITORY" --pattern "$seed_asset" --dir "$seed_dir"
           seed="$seed_dir/$seed_asset"
           test -s "$seed"
@@ -237,11 +241,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release-seed/extracted"
-          SEED_TAG="$(node -p "require('./data/corpus-seed.json').tag")"
-          SEED_ASSET="$(node -p "require('./data/corpus-seed.json').asset")"
-          SEED_SHA256="$(node -p "require('./data/corpus-seed.json').sha256")"
-          SEED_BYTES="$(node -p "require('./data/corpus-seed.json').bytes")"
+          # ADR-0091 D6: the seed is RESOLVED, never read from the committed descriptor. corpus-next-seed.mjs
+          # --require-coverage picks the newest compatible corpus generation that published its sealed
+          # coverage sidecar (D6.2), else the committed bootstrap. The resolved descriptor IS the sealed
+          # corpus-seed.json release evidence, and release.mjs re-resolves against it at publish time
+          # (D6.6) so a release QE'd from generation G never ships after G+1.
+          node scripts/corpus-next-seed.mjs --repo "$GITHUB_REPOSITORY" --require-coverage \
+            --out "$RUNNER_TEMP/release-evidence/corpus-seed.json"
+          descriptor="$RUNNER_TEMP/release-evidence/corpus-seed.json"
+          SEED_TAG="$(node -p "require(process.argv[1]).tag" "$descriptor")"
+          SEED_ASSET="$(node -p "require(process.argv[1]).asset" "$descriptor")"
+          SEED_SHA256="$(node -p "require(process.argv[1]).sha256" "$descriptor")"
+          SEED_BYTES="$(node -p "require(process.argv[1]).bytes" "$descriptor")"
+          SEED_ORIGIN="$(node -p "require(process.argv[1]).origin" "$descriptor")"
           gh release download "$SEED_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$SEED_ASSET" --dir "$RUNNER_TEMP/release-seed"
+          coverage_args=()
+          if [ "$SEED_ORIGIN" = published-generation ]; then
+            gh release download "$SEED_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern CORPUS-COVERAGE.json --pattern coverage-receipt.json --dir "$RUNNER_TEMP/release-seed"
+            coverage_args=(--coverage "$RUNNER_TEMP/release-seed/CORPUS-COVERAGE.json"
+              --coverage-receipt "$RUNNER_TEMP/release-seed/coverage-receipt.json")
+          fi
           seed="$RUNNER_TEMP/release-seed/$SEED_ASSET"
           echo "RUVNET_SEED_BUNDLE=$seed" >> "$GITHUB_ENV"
           test "$(sha256sum "$seed" | cut -d' ' -f1)" = "$SEED_SHA256"
@@ -249,48 +269,17 @@ jobs:
           unzip -q "$seed" -d "$RUNNER_TEMP/release-seed/extracted"
           mapfile -t asset_dirs < <(find "$RUNNER_TEMP/release-seed/extracted" -type f -name '*.big.rvf' ! -path '*/__MACOSX/*' ! -name '._*' -printf '%h\n' | LC_ALL=C sort -u)
           test "${#asset_dirs[@]}" -eq 1
-          # The public ruOS input is capabilities-only. The prior immutable seed predates that
-          # policy, so rebuild its RVF from the curated summary before the packaging boundary checks
-          # it. Never carry vectors or passages embedded from the proprietary repository source.
-          npm install --prefix "${asset_dirs[0]}" --no-save --package-lock=false --ignore-scripts \
-            @xenova/transformers@2.17.2 @ruvector/rvf@0.3.4
-          export XENOVA_PATH="${asset_dirs[0]}/node_modules/@xenova/transformers"
-          export RVF_MODULE_PATH="${asset_dirs[0]}/node_modules"
-          export KB_MODEL_CACHE="$RUNNER_TEMP/ruvnet-brain-model-cache"
-          node scripts/refresh-capability-only-store.mjs --assets "${asset_dirs[0]}"
-          # --repair also re-seals stale ledger hashes after index persistence. The v4.2.1 seed
-          # exposed three roots whose HNSW bytes had advanced after their ledger rows were written.
-          node scripts/rvf-index-audit.mjs --dir "${asset_dirs[0]}" --repair
-          # Do not re-observe GitHub here. GITHUB_TOKEN cannot read user gists (HTTP 403), and
-          # release-QE must consume the checked-in, source-bound observation that was validated
-          # when the corpus candidate was prepared. A separate credentialed refresh updates that
-          # input; this publisher never silently substitutes a partial live observation.
-          node scripts/public-verification-inputs.mjs observe-baseline \
-            --baseline-bundle "$seed" --expected-tag "$SEED_TAG" --expected-sha256 "$SEED_SHA256" \
-            --expected-bytes "$SEED_BYTES" --out "$RUNNER_TEMP/release-evidence/baseline-observation-receipt.json"
-          # --legacy-seed-projection declares, EXPLICITLY, that this rail consumes the pinned
-          # PRE-Step-3/4 corpus seed through the two-pass release-projection path. Without it
-          # build-bundle.mjs applies the step-5 single-pass contract, which this seed cannot satisfy:
-          # measured against v4.2.1-dev on 2026-09-14 it carries 186 stores, no sealed public-input
-          # selection, no public-store-classes.json and no ruv-gists.sources.json, while
-          # data/source-coverage.json observes 195 eligible stores and 492 eligible gists. The flag,
-          # release-projection.mjs's CLI, and assembleBundle's legacySeedProjection branch RETIRE
-          # TOGETHER at plan step 11, when a Step-4-produced seed is published and re-pinned.
-          node scripts/build-bundle.mjs --version "v$(node -p "require('./package.json').version")" \
-            --assets "${asset_dirs[0]}" --legacy-seed-projection
-          baseline_receipt_sha256="$(sha256sum "$RUNNER_TEMP/release-evidence/baseline-observation-receipt.json" | cut -d' ' -f1)"
-          node scripts/release-projection.mjs \
-            --corpus data/source-coverage.json --assets dist/ruvnet-brain \
-            --out "$RUNNER_TEMP/release-projection" \
-            --version "$(node -p "require('./package.json').version")" --source-snapshot "$GITHUB_SHA" \
-            --baseline-receipt-sha256 "$baseline_receipt_sha256" --seed-tag "$SEED_TAG" \
-            --seed-sha256 "$SEED_SHA256" --seed-bytes "$SEED_BYTES"
-          node scripts/build-bundle.mjs --version "v$(node -p "require('./package.json').version")" \
-            --assets "${asset_dirs[0]}" --legacy-seed-projection \
-            --coverage "$RUNNER_TEMP/release-projection/COVERAGE.json" \
-            --projection "$RUNNER_TEMP/release-projection"
+          # ONE assembly, on the path the seed's origin selects (scripts/code-release-corpus.mjs):
+          #   published-generation -> single-pass from the generation's sealed coverage; the generation
+          #     is never mutated (no capability-only refresh, no index repair), and that is re-proven
+          #     byte for byte after the build.
+          #   committed-bootstrap  -> the legacy two-pass projection (capability-only refresh, index
+          #     repair, build / release-projection / build), kept for the pre-ADR-0091 recovery seed.
+          # Do not re-observe GitHub here: GITHUB_TOKEN cannot read user gists (HTTP 403), so release-QE
+          # consumes a sealed observation -- the generation's own, or the checked-in one on the bootstrap.
+          node scripts/code-release-corpus.mjs assemble --descriptor "$descriptor" --seed-bundle "$seed" \
+            --assets "${asset_dirs[0]}" --evidence-dir "$RUNNER_TEMP/release-evidence" "${coverage_args[@]}"
           cp dist/ruvnet-brain.zip "$RUNNER_TEMP/release-evidence/ruvnet-brain.zip"
-          cp data/corpus-seed.json "$RUNNER_TEMP/release-evidence/corpus-seed.json"
           cp dist/ruvnet-brain/RVF-GENERATIONS.json "$RUNNER_TEMP/release-evidence/RVF-GENERATIONS.json"
           # THE SIDECAR MUST NAME THE FILE, NOT THE MACHINE THAT BUILT IT (fixed 2026-08-07, #77).
           #

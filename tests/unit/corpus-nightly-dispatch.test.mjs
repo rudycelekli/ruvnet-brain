@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { detectPublisherActions } from '../../scripts/release-authority.mjs';
+import { MIN_PIPELINE_VERSION } from '../../scripts/corpus-dispatch-decision.mjs';
 
 const ROOT = path.resolve(process.env.RUVNET_RELEASE_CONTRACT_ROOT || path.resolve(import.meta.dirname, '../..'));
 const DISPATCHER = '.github/workflows/corpus-nightly-dispatch.yml';
@@ -69,56 +72,22 @@ describe('corpus nightly dispatcher (ADR-086 step 18)', () => {
   });
 
 
-  it('POLLS the protected child to a terminal state and fails when it did not succeed (2026-09-27 correction)', () => {
-    // A prior version of this test (#315, 2026-09-21) forbade polling here, on the theory that
-    // ntfy-alerts.yml's `workflow_run` listener on protected-release's own completion would carry
-    // visibility instead. That theory is false, and provably so: GitHub's own documented behavior
-    // is that a workflow_dispatch made with the automatic GITHUB_TOKEN (exactly what the dispatch
-    // step below does) runs the target workflow, but workflow_dispatch/repository_dispatch are the
-    // ONLY two events exempt from "GITHUB_TOKEN-triggered events do not create new workflow runs" —
-    // workflow_run is not exempt. So protected-release's completion, when dispatched this way, can
-    // never fire a `workflow_run` listener, no matter what is on its watch list. Checked against
-    // live run history 2026-09-27: every corpus-mode protected-release failure from 2026-09-21
-    // through 2026-09-27 (nine of them) produced zero ntfy-alerts runs within 15 minutes, including
-    // the two that happened AFTER protected-release was added to the watch list on 2026-09-26 —
-    // proving the watch-list entry could never have worked regardless of its presence.
-    //
-    // The fix does not reintroduce the "duplicate polling" #315 removed (two things polling the
-    // same run): it is the ONE poller, living here, in the dispatcher — which is the one part of
-    // this chain that runs on a genuine `schedule:` trigger, so ITS OWN completion IS a real
-    // platform event `workflow_run` correctly fires for (and `corpus-nightly-dispatch` was already,
-    // correctly, on ntfy-alerts.yml's watch list). A failed poll or a non-success child conclusion
-    // becomes this job's own failure, which the already-working listener then pages on.
+  it('RETURNS as soon as the protected run exists: no poll, and a 20-minute bound (2026-09-29 redesign)', () => {
+    // The 340-minute poll kept a runner alive for hours only to turn a child failure into its own. It
+    // is gone: whether a night ended published or no-change is judged by the corpus watchdog workflow, which
+    // is on ntfy-alerts' watch list and needs no secret.
     const source = executable(read(DISPATCHER));
-    expect(source).toContain('while [ "$(date +%s)" -lt "$deadline" ]; do');
-    expect(source).toContain('gh run view "$run_id"');
-    expect(source).toContain('sleep 60');
-    expect(source).toMatch(/if \[ "\$status" != completed \]; then\s*\n\s*echo "::error::/);
-    expect(source).toMatch(/if \[ "\$conclusion" != success \]; then\s*\n\s*echo "::error::/);
-    // Both non-success paths exit non-zero -- a red dispatcher is the alert.
-    const timeoutBranch = source.split('if [ "$status" != completed ]; then')[1]?.split('fi')[0] || '';
-    const conclusionBranch = source.split('if [ "$conclusion" != success ]; then')[1]?.split('fi')[0] || '';
-    expect(timeoutBranch).toContain('exit 1');
-    expect(conclusionBranch).toContain('exit 1');
+    for (const removed of ['gh run view', 'sleep 60', 'deadline=', 'Wait for the dispatched corpus run']) {
+      expect(source, `the dispatcher must not carry ${removed}`).not.toContain(removed);
+    }
+    const jobTimeout = Number((source.match(/timeout-minutes: (\d+)\n\s+permissions:\n\s+contents: read\n\s+actions: write/) || [])[1]);
+    expect(jobTimeout).toBe(20);
   });
 
-  it('stays secret-free while fixing alerting -- exit 1 is the entire mechanism', () => {
-    // The dispatcher's zero-secrets boundary (asserted below in the signing/publication-authority
-    // test) is deliberate and must survive this fix intact: no direct ntfy call here. A red
-    // dispatcher reaches the phone through corpus-nightly-dispatch's own, already-correctly-wired
-    // workflow_run listener -- nothing new to leak, nothing new to rotate.
+  it('stays secret-free -- no direct ntfy call', () => {
     const source = executable(read(DISPATCHER));
     expect(source).not.toContain('NTFY_TOPIC');
     expect(source).not.toContain('ntfy.sh');
-  });
-
-  it('still bounds the poll within its own job timeout, with real margin', () => {
-    const source = read(DISPATCHER);
-    const jobTimeout = Number((source.match(/timeout-minutes: (\d+)\n\s+permissions:\n\s+contents: read\n\s+actions: write/) || [])[1]);
-    const pollBudget = Number((executable(source).match(/deadline=\$\(\( \$\(date \+%s\) \+ (\d+) \* 60 \)\)/) || [])[1]);
-    expect(jobTimeout).toBe(360);
-    expect(pollBudget).toBeGreaterThan(0);
-    expect(pollBudget).toBeLessThan(jobTimeout);
   });
 
   it('records the dispatch against the exact candidate it dispatched', () => {
@@ -131,22 +100,156 @@ describe('corpus nightly dispatcher (ADR-086 step 18)', () => {
   });
 });
 
-describe('the dispatcher is disarmed until step 16 has shipped (ADR-086 A7 ordering)', () => {
-  it('stands down cleanly rather than dispatching before an owner-gated code release pins the runtime', () => {
+describe('the dispatcher decides through one module, never against main HEAD (2026-09-29 redesign)', () => {
+  const armedStep = () => read(DISPATCHER)
+    .split("name: Decide whether tonight's corpus run is armed")[1]
+    .split('- name:')[0];
+
+  it('never reads a committed pin; it resolves the approved runtime from the signed install verification', () => {
     const source = read(DISPATCHER);
-    expect(source).toContain('if [[ -s data/approved-runtime.json ]]; then');
-    expect(source).toContain("echo 'armed=true' >> \"$GITHUB_OUTPUT\"");
-    expect(source).toContain("echo 'armed=false' >> \"$GITHUB_OUTPUT\"");
-    expect(source).toContain('corpus-nightly-dispatch is DISARMED');
-    // Every step that can reach the release rail is gated on the armed state.
-    const gated = source.match(/if: steps\.armed\.outputs\.armed == 'true'/g) || [];
-    expect(gated.length).toBeGreaterThanOrEqual(2);
+    expect(source).not.toContain('data/approved-runtime.json');
+    expect(armedStep()).toContain('node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY"');
+    expect(source).toMatch(/fetch-depth: 0/);
+  });
+
+  it('every verdict comes from scripts/corpus-dispatch-decision.mjs; no HEAD or version equality remains', () => {
+    const step = executable(armedStep());
+    expect(step).toContain('node scripts/corpus-dispatch-decision.mjs --nightly "${CORPUS_NIGHTLY:-}"');
+    expect(step).toContain('--github-output "$GITHUB_OUTPUT"');
+    for (const removed of ['CANDIDATE_SHA', 'CANDIDATE_VERSION', 'approved_sha" !=', '!= on ]]']) {
+      expect(step, `the armed step must not carry ${removed}`).not.toContain(removed);
+    }
+    // The kill switch is asked of the same module BEFORE the ~555 MB resolve.
+    expect(step).toContain('corpus-dispatch-decision.mjs --is-off "${CORPUS_NIGHTLY:-}"');
+    expect(step.indexOf('--is-off')).toBeLessThan(step.indexOf('approved-runtime.mjs --resolve'));
+    expect(step).toContain('CORPUS_NIGHTLY: ${{ vars.CORPUS_NIGHTLY }}');
+  });
+
+  it('dispatches the RESOLVED identity, and every step that can reach the release rail is gated on armed', () => {
+    const source = read(DISPATCHER);
     const dispatchStep = source.split('name: Dispatch protected-release.yml on protected main in corpus mode')[1].split('- name:')[0];
     expect(dispatchStep).toContain("if: steps.armed.outputs.armed == 'true'");
-    // Disarmed is NOT a failure: a nightly red X for a correctly-disarmed scheduler trains the owner
-    // to ignore the alert that matters.
-    const armedStep = source.split('name: Stand down until an owner-gated code release has armed unattended promotion')[1].split('- id:')[0].split('- name:')[0];
-    expect(armedStep).not.toContain('exit 1');
-    expect(armedStep).not.toContain('::error::');
+    expect(dispatchStep).toContain('CANDIDATE_SHA: ${{ steps.armed.outputs.approved_sha }}');
+    expect(dispatchStep).toContain('CANDIDATE_VERSION: ${{ steps.armed.outputs.approved_version }}');
+    expect(dispatchStep).toContain('--ref main');
+    const gated = source.match(/if: steps\.armed\.outputs\.armed == 'true'/g) || [];
+    expect(gated.length).toBe(2);
+  });
+});
+
+// Behaviour, not text: execute the real decision step's bash, crossing the process boundary.
+// `git fetch` is stubbed (no network); the decision module and bash are real.
+describe('the decision step, executed', () => {
+  const dirs = [];
+  afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true }); });
+  const tmp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nightly-armed-')); dirs.push(dir); return dir; };
+  const [MAJ, MIN, PAT] = MIN_PIPELINE_VERSION.split('.').map(Number);
+  const NEWER = `${MAJ}.${MIN}.${PAT + 5}`;
+  const BELOW = `${MAJ}.${MIN}.${PAT - 1}`;
+  const B = 'b'.repeat(40);
+
+  const script = () => {
+    const lines = read(DISPATCHER).split("name: Decide whether tonight's corpus run is armed")[1]
+      .split('- name:')[0].split('run: |\n')[1].split('\n');
+    const indent = lines[0].match(/^ */)[0].length;
+    return lines.map((line) => line.slice(indent)).join('\n');
+  };
+
+  /** `resolver`: { status, release } fakes approved-runtime.mjs; or { gh } runs the REAL resolver against a fake gh. */
+  function runStep({ resolver, nightly = 'on' }) {
+    const dir = tmp();
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    const resolveLog = path.join(dir, 'resolve-calls');
+    fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\n[ "$1" = fetch ] && exit 0\nexec ${JSON.stringify(spawnSync('which', ['git'], { encoding: 'utf8' }).stdout.trim())} "$@"\n`);
+    fs.chmodSync(path.join(bin, 'git'), 0o755);
+    if (resolver.release !== undefined || resolver.status !== undefined) {
+      fs.writeFileSync(path.join(dir, 'release.json'), JSON.stringify(resolver.release ?? {}));
+      fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
+if [ "$1" = scripts/approved-runtime.mjs ]; then echo called >> ${JSON.stringify(resolveLog)}; cat ${JSON.stringify(path.join(dir, 'release.json'))}; exit ${resolver.status ?? 0}; fi
+exec ${JSON.stringify(process.execPath)} "$@"\n`);
+    } else {
+      fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+    }
+    fs.chmodSync(path.join(bin, 'node'), 0o755);
+    const output = path.join(dir, 'github-output');
+    fs.writeFileSync(output, '');
+    const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      GITHUB_OUTPUT: output, RUNNER_TEMP: dir, GITHUB_REPOSITORY: 'stuinfla/ruvnet-brain',
+      ...(resolver.gh ? { RUVNET_GH_COMMAND: resolver.gh } : {}) };
+    if (nightly === undefined) delete env.CORPUS_NIGHTLY; else env.CORPUS_NIGHTLY = nightly;
+    const result = spawnSync('bash', ['-c', script()], { cwd: ROOT, encoding: 'utf8', timeout: 60_000, env });
+    return { ...result, output: fs.readFileSync(output, 'utf8'), resolved: fs.existsSync(resolveLog) };
+  }
+
+  const fakeGh = (withAggregate, tags = [`v${NEWER}`, `v${BELOW}`]) => {
+    const dir = tmp();
+    const file = path.join(dir, 'gh.cjs');
+    fs.writeFileSync(file, `const fs = require('node:fs'); const path = require('node:path');
+const args = process.argv.slice(2);
+if (args[0] === 'release' && args[1] === 'list') { process.stdout.write(JSON.stringify(${JSON.stringify(tags.map((tagName) => ({ tagName })))})); process.exit(0); }
+if (args[0] === 'api') {
+  const assets = [{ name: 'ruvnet-brain.zip' }];
+  if (${withAggregate}) assets.push({ name: 'public-verification-aggregate.json' });
+  process.stdout.write(JSON.stringify({ assets })); process.exit(0);
+}
+if (args[0] === 'release' && args[1] === 'download') {
+  fs.writeFileSync(path.join(args[args.indexOf('--dir') + 1], args[args.indexOf('--pattern') + 1]), '{"verdict":"PASS","forged":true}');
+  process.exit(0);
+}
+process.exit(9);
+`);
+    const wrapper = path.join(dir, 'gh');
+    fs.writeFileSync(wrapper, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(file)} "$@"\n`);
+    fs.chmodSync(wrapper, 0o755);
+    return wrapper;
+  };
+
+  it('MAIN AHEAD of the approved release: still arms, at the approved sourceSha (the old rule stood down)', () => {
+    // main HEAD here is this checkout's HEAD; the approved release is a different commit and version.
+    const result = runStep({ resolver: { release: { tag: `v${NEWER}`, version: NEWER, sourceSha: B } } });
+    expect(result.status, result.stderr + result.stdout).toBe(0);
+    expect(result.output).toBe(`armed=true\napproved_sha=${B}\napproved_version=${NEWER}\napproved_tag=v${NEWER}\nverdict=arm\n`);
+  });
+
+  it('kill switch: armed when CORPUS_NIGHTLY is unset; `off` stands down WITHOUT resolving anything', () => {
+    const unset = runStep({ nightly: undefined, resolver: { release: { tag: `v${NEWER}`, version: NEWER, sourceSha: B } } });
+    expect(unset.status).toBe(0);
+    expect(unset.output).toContain('armed=true');
+    const off = runStep({ nightly: 'off', resolver: { release: { tag: `v${NEWER}`, version: NEWER, sourceSha: B } } });
+    expect(off.status).toBe(0);
+    expect(off.output).toBe('armed=false\nverdict=stand-down\n');
+    expect(off.resolved).toBe(false);
+    expect(off.stdout).toMatch(/::notice::.*kill switch/);
+  });
+
+  it('an approved runtime older than the pipeline floor stands down (new workflow text never drives old scripts)', () => {
+    const result = runStep({ resolver: { release: { tag: `v${BELOW}`, version: BELOW, sourceSha: B } } });
+    expect(result.status).toBe(0);
+    expect(result.output).toBe('armed=false\nverdict=stand-down\n');
+  });
+
+  it('REAL resolver, newest release has no aggregate yet -> stands down cleanly (exit 0, armed=false)', () => {
+    const result = runStep({ resolver: { gh: fakeGh(false) } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toBe('armed=false\nverdict=stand-down\n');
+    expect(result.stdout).toMatch(/not reached install-verified yet/);
+  });
+
+  it('REAL resolver, VERSION SKEW: newest release below the floor has an aggregate this verifier refuses -> stands down, not red', () => {
+    const result = runStep({ resolver: { gh: fakeGh(true, [`v${BELOW}`]) } });
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.output).toBe('armed=false\nverdict=stand-down\n');
+    expect(result.stdout).toMatch(new RegExp(`::notice::.*newest code release v${BELOW.replaceAll('.', '\\.')} predates`));
+    // The resolver's own refusal is still shown in the log.
+    expect(result.stderr).toMatch(/refusing to fall back/);
+  });
+
+  it('REAL resolver, newest release aggregate present but invalid -> fails LOUDLY (exit 1), never an older release', () => {
+    const result = runStep({ resolver: { gh: fakeGh(true) } });
+    expect(result.status).toBe(1);
+    expect(result.output).toBe('armed=false\nverdict=fail\n');
+    expect(result.stdout).toMatch(/::error::.*does not hold/);
+    expect(result.stderr).toMatch(new RegExp(`v${NEWER.replaceAll('.', '\\.')} \\(the newest\\)[\\s\\S]*refusing to fall back`));
   });
 });

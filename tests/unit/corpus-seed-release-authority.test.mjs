@@ -4,7 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createCorpusReceipt } from '../../scripts/corpus-candidate.mjs';
-import { fixtureReleaseRoot, sealedCorpusBundle, writeAccuracyReport } from '../helpers/corpus-seed-fixture.mjs';
+import { verifyCoverageSidecar } from '../../scripts/corpus-coverage-sidecar.mjs';
+import {
+  fixtureReleaseRoot, ineligibleRepositoryRow, retireInRecallReport, sealedCorpusBundle, sha256, writeAccuracyReport, writeCoverageFor,
+} from '../helpers/corpus-seed-fixture.mjs';
+import { loadFixture } from '../../scripts/oracle/repo-recall.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const HEAD = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
@@ -55,10 +59,13 @@ process.exit(0);
   });
   const digest = receipt.archive.sha256;
   const tag = `corpus-sha256-${digest}`;
+  const coverageFile = path.join(dir, 'source-coverage.json');
+  await writeCoverageFor(receipt, coverageFile);
   const args = [
     '--corpus-seed', '--corpus-tag', tag,
     '--corpus-bundle', bundle,
     '--corpus-receipt', receiptFile,
+    '--corpus-coverage', coverageFile,
     '--target', HEAD,
     '--repo', 'stuinfla/ruvnet-brain',
   ];
@@ -77,7 +84,7 @@ process.exit(0);
     RUVNET_GH_COMMAND: process.execPath,
     RUVNET_GH_SCRIPT: path.join(bin, 'gh-fixture.mjs'),
   };
-  return { dir, bundle, digest, receipt, receiptFile, tag, args, env, log, releaseRoot };
+  return { dir, bundle, digest, receipt, receiptFile, tag, args, env, log, releaseRoot, coverageFile };
 }
 
 function run(f, { args = f.args, env = f.env } = {}) {
@@ -117,15 +124,48 @@ describe('protected corpus-seed release authority', () => {
 
   it.each([
     ['target differs from HEAD', (f) => { f.args = replaceArg(f.args, '--target', 'f'.repeat(40)); }],
-    ['GITHUB_SHA differs from HEAD', (f) => { f.env.GITHUB_SHA = 'f'.repeat(40); }],
+    ['target is not a 40-hex SHA (format checked first)', (f) => { f.args = replaceArg(f.args, '--target', '--upload-pack=touch'); }],
     ['receipt source differs from target', (f) => { f.receipt.builderSourceSha = 'f'.repeat(40); writeReceipt(f); }],
+    ['GITHUB_SHA is not a commit at all', (f) => { f.env.GITHUB_SHA = '--upload-pack=touch'; }],
   ])('refuses when %s', async (_name, mutate) => {
     const f = await fixture();
     mutate(f);
     const result = run(f);
     expect(result.status).toBe(1);
-    expect(result.stderr).toMatch(/target.*HEAD.*GITHUB_SHA.*receipt/i);
+    expect(result.stderr).toMatch(/target must exactly equal HEAD and the corpus receipt builderSourceSha \(and GITHUB_SHA must be a commit\)/);
     expect(fs.existsSync(f.log)).toBe(false);
+  });
+
+  // DECOUPLED FROM main HEAD (2026-09-29 nightly redesign). The corpus is built at the approved
+  // runtime's source, which is on main's history but usually behind main HEAD. The rule is ANCESTRY
+  // of this run's GITHUB_SHA -- never equality with it (which stood the nightly down whenever main was
+  // ahead of the newest verified release). What the equality rule protected against (promoting an
+  // OLDER runtime over a newer live code release) is enforced for customer promotion by the
+  // publish-time re-resolve of --approved-tag (tests/unit/corpus-customer-promotion.test.mjs).
+  it.each([
+    ['an unknown commit', () => 'f'.repeat(40)],
+    ['an OLDER commit (the target is off, or ahead of, protected main\'s history)',
+      () => execFileSync('git', ['rev-parse', 'HEAD~1'], { cwd: ROOT, encoding: 'utf8' }).trim()],
+  ])('refuses when GITHUB_SHA is %s, before invoking gh', async (_name, sha) => {
+    const f = await fixture();
+    f.env.GITHUB_SHA = sha();
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/is not an ancestor of this run's GITHUB_SHA/);
+    expect(fs.existsSync(f.log)).toBe(false);
+  });
+
+  it('ACCEPTS a target that is an ancestor of a newer main GITHUB_SHA (the approved runtime behind main)', async () => {
+    const f = await fixture();
+    // A real commit whose parent is HEAD, created as a dangling object (no ref, no working-tree change).
+    f.env.GITHUB_SHA = execFileSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost',
+      'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'fixture: a newer main commit'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    expect(f.env.GITHUB_SHA).not.toBe(HEAD);
+    const result = run(f);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const calls = fs.readFileSync(f.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(calls.map((call) => `${call[0]} ${call[1]}`)).toEqual(['release view', 'release create']);
+    expect(calls[1][calls[1].indexOf('--target') + 1]).toBe(HEAD);
   });
 
   it('requires a full lowercase digest tag bound to the receipt and bundle bytes', async () => {
@@ -222,8 +262,108 @@ describe('protected corpus-seed release authority', () => {
       '--title', `Immutable corpus seed ${f.digest.slice(0, 16)}`,
       '--notes', expect.stringContaining(`Archive SHA-256: ${f.digest}`),
       f.bundle, f.receiptFile, `${f.bundle}.accuracy.json`, `${f.bundle}.recall.json`,
+      // ADR-0091 D6.2: the generation's sealed coverage and its sidecar ride with every corpus release.
+      expect.stringMatching(/[\\/]CORPUS-COVERAGE\.json$/), expect.stringMatching(/[\\/]coverage-receipt\.json$/),
     ]);
     expect(calls[1]).not.toContain('--draft');
     expect(calls[1]).not.toContain('--clobber');
+  });
+});
+
+// ADR-0091 D6.2 (+ the D10 check D5 could not place in the publisher): the corpus publisher is the one
+// place that can SEE a generation's coverage, so it binds it, refuses a degraded one, and publishes it.
+describe('corpus generation coverage sidecar (ADR-0091 D6.2)', () => {
+  const ghCalls = (f) => (fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+
+  it('publishes CORPUS-COVERAGE.json (exact sealed bytes) and a coverage-receipt.json a later reader can verify', async () => {
+    const f = await fixture();
+    const result = run(f);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const create = ghCalls(f).find((args) => args[1] === 'create');
+    const coverageAsset = create.find((arg) => String(arg).endsWith('/CORPUS-COVERAGE.json'));
+    const receiptAsset = create.find((arg) => String(arg).endsWith('/coverage-receipt.json'));
+    expect(fs.readFileSync(coverageAsset)).toEqual(fs.readFileSync(f.coverageFile));
+    const sidecar = JSON.parse(fs.readFileSync(receiptAsset, 'utf8'));
+    expect(sidecar).toMatchObject({ schemaVersion: 1, kind: 'ruvnet-brain-corpus-coverage-receipt', generationTag: f.tag,
+      archiveSha256: f.digest, coverageFile: 'CORPUS-COVERAGE.json', degraded: { carried: [], missing: [] } });
+    // The shape D10's publisher-side check and D6's resolver read.
+    const verified = verifyCoverageSidecar({ sidecar, coverageBytes: fs.readFileSync(coverageAsset), generationTag: f.tag,
+      archiveSha256: f.digest, archiveBytes: f.receipt.archive.bytes });
+    expect(verified.degraded).toEqual({ carried: [], missing: [] });
+  });
+
+  it('REFUSES a degraded generation (a carried store) before any network call while D10 records no transition', async () => {
+    const f = await fixture();
+    await writeCoverageFor(f.receipt, f.coverageFile, { carried: true });
+    const result = run(f);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/degraded generation \(1 carried, 0 missing\) must not be published: no tolerant-validator transition/);
+    expect(ghCalls(f)).toEqual([]);
+  });
+
+  it('REFUSES coverage that was measured against other bytes than this archive, before any network call', async () => {
+    const f = await fixture();
+    await writeCoverageFor(f.receipt, f.coverageFile, { rvfSha256: '2'.repeat(64) });
+    const result = run(f);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/sealed coverage does not bind this archive .*different alpha RVF bytes/);
+    expect(ghCalls(f)).toEqual([]);
+  });
+
+  it('REFUSES to publish a generation without its coverage', async () => {
+    const f = await fixture();
+    const at = f.args.indexOf('--corpus-coverage');
+    const result = run(f, { args: [...f.args.slice(0, at), ...f.args.slice(at + 2)] });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/coverage must be an absolute regular file/);
+    expect(ghCalls(f)).toEqual([]);
+  });
+});
+
+// ADR-0091 D7.3: readers verify a claimed retirement, never trust it. The fixture's coverage is a complete
+// one-row enumeration (alpha), so every frozen fixture repository other than alpha has NO row -- a
+// genuine retirement -- unless a row is added for it, which makes the same claim false.
+describe('a claimed repo-recall retirement is recomputed from coverage by the publisher (ADR-0091 D7.3)', () => {
+  const ghCalls = (f) => (fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+  const RETIRED = loadFixture().questions[0].store;
+  const reseal = async (f, coverageFile) => {
+    f.receipt = await createCorpusReceipt({ bundleFile: f.bundle, receiptFile: f.receiptFile, builderSourceSha: HEAD,
+      createdAt: '2026-08-21T12:34:56.000Z', coverageFile });
+  };
+
+  it('GREEN: a retirement the generation\'s own coverage proves seals (corpus-candidate) and publishes (release.mjs)', async () => {
+    const f = await fixture();
+    retireInRecallReport(`${f.bundle}.recall.json`, [RETIRED], f.coverageFile);
+    await reseal(f, f.coverageFile);
+    expect(f.receipt.recallSummary.questions).toBe(loadFixture().questions.length - 1);
+    const result = run(f);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(ghCalls(f).some((args) => args[1] === 'create')).toBe(true);
+  });
+
+  it('RED: corpus-candidate rejects a claimed retirement when it is given no coverage to verify it against', async () => {
+    const f = await fixture();
+    retireInRecallReport(`${f.bundle}.recall.json`, [RETIRED], f.coverageFile);
+    await expect(reseal(f, null)).rejects.toThrow(/claims retired question\(s\) but no coverage was supplied/);
+  });
+
+  it('RED: a FALSE retirement (the repository has a coverage row) is rejected by corpus-candidate AND by release.mjs, before any network call', async () => {
+    const f = await fixture();
+    // The repository exists in the observation (an ineligible row), so it is not retired -- claiming it is
+    // exactly how a report would hide a question it could not answer.
+    await writeCoverageFor(f.receipt, f.coverageFile, { extraRows: [ineligibleRepositoryRow(RETIRED)] });
+    const recallFile = `${f.bundle}.recall.json`;
+    retireInRecallReport(recallFile, [RETIRED], f.coverageFile);
+    const lie = new RegExp(`claims \\[${RETIRED.toLowerCase()}\\] retired, but the coverage it names does not retire them`);
+    await expect(reseal(f, f.coverageFile)).rejects.toThrow(lie);
+    // release.mjs reads the report itself, not only through corpus-candidate: bind the forged report into
+    // the receipt so the publisher's OWN reader is the one that has to catch it.
+    f.receipt.recallReport = { file: path.basename(recallFile), sha256: sha256(recallFile), bytes: fs.statSync(recallFile).size };
+    writeReceipt(f);
+    const result = run(f);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/retrieval does not qualify this corpus for publication/);
+    expect(result.stderr).toMatch(lie);
+    expect(ghCalls(f)).toEqual([]);
   });
 });

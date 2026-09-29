@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const ROOT = path.resolve(process.env.RUVNET_RELEASE_CONTRACT_ROOT || path.resolve(import.meta.dirname, '../..'));
 const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
@@ -101,9 +103,15 @@ describe('protected-release corpus chain (ADR-086 steps 9 + 17)', () => {
 
   it('WRONG RUNTIME BYTES: promotion is refused unless the archive ships the approved shipped runtime', () => {
     const blocks = jobBlocks(workflow());
-    expect(blocks['corpus-identity']).toContain('data/approved-runtime.json');
+    expect(workflow()).not.toContain('data/approved-runtime.json'); // ADR-0091 D3: never a committed pin
+    expect(blocks['corpus-identity']).toContain('node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY"');
     expect(blocks['corpus-publish']).toContain('node scripts/approved-runtime.mjs --verify --archive-manifest');
     const publish = blocks['corpus-publish'];
+    // The publisher re-resolves EXACTLY the release identity approved, on its own runner, requires it to
+    // name this candidate, and verifies against that pin — it never trusts a pin handed over as output.
+    expect(publish).toContain('--resolve --repo "$GITHUB_REPOSITORY" --tag "$APPROVED_TAG"');
+    expect(publish).toContain('--pin "$RUNNER_TEMP/approved-runtime.json"');
+    expect(publish.indexOf('approved-runtime.mjs --resolve')).toBeLessThan(publish.indexOf('approved-runtime.mjs --verify'));
     // The pin must be checked BEFORE anything is signed: a signature over unapproved executables is
     // the exact artifact this guard exists to never produce.
     expect(publish.indexOf('approved-runtime.mjs --verify')).toBeLessThan(publish.indexOf('sign-bundle.mjs'));
@@ -120,22 +128,30 @@ describe('protected-release corpus chain (ADR-086 steps 9 + 17)', () => {
     expect(publish).toContain('RUVNET_SIGNING_KEY: ${{ secrets.RUVNET_SIGNING_KEY }}');
   });
 
-  it('STALE / CONCURRENT: corpus and code promotion serialize in one group that never cancels', () => {
+  it('CONCURRENCY: only corpus-publish joins the release group; the ~3 h preparation does not (2026-09-29)', () => {
     const source = workflow();
-    expect(source).toContain('group: ruvnet-brain-release');
-    expect(source).toContain('cancel-in-progress: false');
-    // One group for both modes: two release-moving runs must never overlap.
-    expect(source.match(/^concurrency:$/gm)).toHaveLength(1);
+    const blocks = jobBlocks(source);
+    // Workflow level: code runs hold `ruvnet-brain-release` for the whole run; corpus runs get their
+    // own preparation group, so a nightly preparation never blocks (or waits on) a code release.
+    const header = source.slice(0, source.indexOf('\njobs:\n'));
+    expect(header).toMatch(/^concurrency:\n {2}group: \$\{\{ inputs\.mode == 'corpus' && 'ruvnet-brain-corpus-preparation' \|\| 'ruvnet-brain-release' \}\}\n {2}cancel-in-progress: false$/m);
+    // Job level: the one corpus job that moves releases/latest serializes with code publication.
+    expect(blocks['corpus-publish']).toMatch(/\n {4}concurrency:\n {6}group: ruvnet-brain-release\n {6}cancel-in-progress: false\n/);
+    for (const job of [...CODE_JOBS, ...CORPUS_JOBS].filter((name) => name !== 'corpus-publish')) {
+      expect(blocks[job], `${job} must not declare its own concurrency`).not.toMatch(/\n {4}concurrency:/);
+    }
+    expect(source).not.toMatch(/cancel-in-progress: true/);
   });
 
-  it('NO-CHANGE ROUND: an unchanged reconciliation publishes nothing and mints no tag', () => {
+  it('NO-CHANGE ROUND: decided before building (no_change output); publishes nothing and mints no tag', () => {
     const blocks = jobBlocks(workflow());
-    const unchanged = "needs.corpus-prepare.outputs.archive_sha256 == needs.corpus-prepare.outputs.seed_sha256";
-    const changed = "needs.corpus-prepare.outputs.archive_sha256 != needs.corpus-prepare.outputs.seed_sha256";
-    expect(blocks['corpus-no-change']).toContain(unchanged);
-    expect(blocks['corpus-authorize']).toContain(changed);
-    expect(blocks['corpus-publish']).toContain(changed);
+    expect(blocks['corpus-no-change']).toContain("needs.corpus-prepare.outputs.no_change == 'true'");
+    expect(blocks['corpus-authorize']).toContain("needs.corpus-prepare.outputs.no_change != 'true'");
+    expect(blocks['corpus-publish']).toContain("needs.corpus-prepare.outputs.no_change != 'true'");
     expect(blocks['corpus-no-change']).not.toContain('release.mjs');
+    // The old comparison (rebuilt archive digest vs seed digest) can never match; it is gone.
+    expect(workflow()).not.toContain('archive_sha256 == needs.corpus-prepare.outputs.seed_sha256');
+    expect(workflow()).not.toContain('archive_sha256 != needs.corpus-prepare.outputs.seed_sha256');
   });
 
   it('ORDER: authenticate, then import, then publish — bound to the authorized candidate SHA', () => {
@@ -184,6 +200,34 @@ describe('corpus-seed.yml preparation contract', () => {
   });
 });
 
+describe('corpus-seed.yml pre-build no-change and decoupling (2026-09-29)', () => {
+  it('exposes no_change, wired from the --no-change-out verdict corpus-reconcile always writes', () => {
+    const source = seedWorkflow();
+    expect(source).toContain('--no-change-out "$RUNNER_TEMP/no-change.json"');
+    expect(source).toContain('value: ${{ jobs.prepare.outputs.no_change }}');
+    expect(source).toContain('no_change: ${{ steps.nochange.outputs.no_change }}');
+    // A missing verdict is a failure, never a quiet night.
+    expect(source).toContain("test -s \"$RUNNER_TEMP/no-change.json\" || { echo 'reconciliation wrote no --no-change-out verdict' >&2; exit 1; }");
+  });
+
+  it('a no-change night seals, stages and uploads nothing', () => {
+    const source = seedWorkflow();
+    for (const step of ['Record exact prepared identities', 'Stage the sealed candidate outside the tracked tree',
+      'Upload exact candidate for protected-release.yml', 'State the remaining authority boundary']) {
+      const body = source.split(`- name: ${step}`)[1].split('\n      - ')[0];
+      expect(body, step).toContain("if: steps.nochange.outputs.no_change != 'true'");
+    }
+    expect(source.indexOf('id: nochange')).toBeLessThan(source.indexOf('id: seal'));
+  });
+
+  it('builds at the approved source on main\'s history, never requiring it to BE main HEAD', () => {
+    const source = executable(seedWorkflow());
+    expect(source).not.toContain('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+    expect(source).toContain('git merge-base --is-ancestor "$EXPECTED_SHA" origin/main');
+    expect(source).toContain('test "$approved_sha" = "$EXPECTED_SHA"');
+  });
+});
+
 describe('missing owner prerequisites fail loudly rather than silently', () => {
   it('names the exact owner action when the corpus signing environment has no key', () => {
     // GitHub auto-creates an unknown environment with no secrets, so `Production – corpus` being
@@ -201,11 +245,94 @@ describe('missing owner prerequisites fail loudly rather than silently', () => {
     expect(publish.indexOf('RUVNET_SIGNING_KEY:-')).toBeLessThan(publish.indexOf('node scripts/sign-bundle.mjs'));
   });
 
-  it('names the exact owner action when no code release has pinned the runtime yet', () => {
-    const identity = jobBlocks(workflow())['corpus-identity'];
-    expect(identity).toContain('data/approved-runtime.json is missing');
-    expect(identity).toContain('approved-runtime.mjs --emit');
-    const guard = identity.split('if [[ ! -s data/approved-runtime.json ]]; then')[1].split('fi')[0];
+  it('builds at the APPROVED runtime on main\'s history -- ancestry, never main-HEAD equality (2026-09-29)', () => {
+    const blocks = jobBlocks(workflow());
+    const identity = blocks['corpus-identity'];
+    for (const removed of ['test "$GITHUB_SHA" = "$EXPECTED_SHA"', 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"',
+      'test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"']) {
+      expect(executable(identity), `corpus-identity must not carry ${removed}`).not.toContain(removed);
+    }
+    expect(identity).toContain('ref: ${{ github.sha }}');
+    expect(identity).toContain('git merge-base --is-ancestor "$EXPECTED_SHA" "$GITHUB_SHA"');
+    expect(identity).toContain('git show "$EXPECTED_SHA:package.json"');
+    expect(identity).toContain('MIN_PIPELINE_VERSION');
+    // The candidate must still be exactly the resolved approved source; a NEWER approved runtime is superseded, not red.
+    const guard = identity.split('if [[ "$approved_sha" != "$EXPECTED_SHA" || "$approved_version" != "$EXPECTED_VERSION" ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(guard).toContain('is not the approved runtime');
+    expect(guard).toContain('exit 1');
+    expect(identity).toContain("echo 'superseded=true' >> \"$GITHUB_OUTPUT\"");
+    expect(blocks['corpus-prepare']).toContain("needs.corpus-identity.outputs.superseded != 'true'");
+    // ADR-0091 D4: the seed is judged by the approved runtime's own readers, materialized from EXPECTED_SHA.
+    expect(identity).toContain('git worktree add --detach "$approved_source" "$EXPECTED_SHA"');
+    expect(identity).toContain('--runtime-root "$approved_source" --out "$RUNNER_TEMP/next-seed.json"');
+    expect(identity.indexOf('approved-runtime.mjs --resolve')).toBeLessThan(identity.indexOf('corpus-next-seed.mjs'));
+    // Provenance: the run is this run (its head is main at dispatch); the artifact is named by the candidate.
+    const authorize = blocks['corpus-authorize'];
+    expect(authorize).toContain('const runHead = process.env.GITHUB_SHA;');
+    expect(authorize).toContain('run.head_sha === runHead');
+    expect(authorize).toContain('artifact.workflow_run.head_sha === runHead');
+    expect(authorize).toContain('const artifactName = `corpus-seed-prepared-${sha}`');
+    // The publisher runs the approved source, proves it is on this run's history, and re-resolves at publish time.
+    const publish = blocks['corpus-publish'];
+    expect(executable(publish)).not.toContain('test "$CANDIDATE_SHA" = "$GITHUB_SHA"');
+    expect(publish).toContain('git merge-base --is-ancestor "$CANDIDATE_SHA" "$GITHUB_SHA"');
+    expect(publish.indexOf('merge-base --is-ancestor')).toBeLessThan(publish.indexOf('sign-bundle.mjs'));
+    expect(publish).toContain('--approved-tag "$APPROVED_TAG"');
+    expect(publish).toContain('APPROVED_TAG: ${{ needs.corpus-identity.outputs.approved_tag }}');
+  });
+
+  it('SUPERSEDED (release.mjs exit 4) is a warning with outcome=superseded, never red; anything else non-zero is red', () => {
+    const publish = jobBlocks(workflow())['corpus-publish'];
+    const step = publish.slice(publish.indexOf('id: publish'));
+    const exit4 = step.split('if [[ "$status" -eq 4 ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(exit4).toContain("echo 'outcome=superseded' >> \"$GITHUB_OUTPUT\"");
+    expect(exit4).toContain('::warning');
+    expect(exit4).toContain('exit 0');
+    expect(step.indexOf('if [[ "$status" -eq 4 ]]')).toBeLessThan(step.indexOf('test "$status" -eq 0'));
+    expect(step.indexOf('test "$status" -eq 0')).toBeLessThan(step.indexOf("echo 'outcome=published'"));
+    expect(publish).toContain('outcome: ${{ steps.publish.outputs.outcome }}');
+  });
+});
+
+// Behaviour, not text: the terminal-outcome record the corpus watchdog workflow reads, executed.
+describe('corpus terminal outcome, executed', () => {
+  const nodeBlock = () => {
+    const block = jobBlocks(workflow())['corpus-terminal-outcome'];
+    const body = block.split("node - <<'NODE' > corpus-release-outcome.json\n")[1].split('\n          NODE')[0];
+    return body.split('\n').map((line) => line.replace(/^ {10}/, '')).join('\n');
+  };
+  const outcome = (env) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'corpus-outcome-'));
+    try {
+      const result = spawnSync(process.execPath, ['-'], { input: nodeBlock(), encoding: 'utf8', cwd: dir,
+        env: { ...process.env, RUN_ID: '1', RUN_ATTEMPT: '1', RUN_URL: 'u', RUN_EVENT: 'workflow_dispatch', RUN_SHA: 'a'.repeat(40), RUN_BRANCH: 'main',
+          IDENTITY_RESULT: 'success', PREPARE_RESULT: 'success', NO_CHANGE_RESULT: 'skipped', AUTHORIZE_RESULT: 'success', PUBLISH_RESULT: 'success',
+          IDENTITY_SUPERSEDED: 'false', PUBLISH_OUTCOME: 'published', ...env } });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+
+  it.each([
+    ['published', {}, 'success', 'published'],
+    ['no-change', { NO_CHANGE_RESULT: 'success', AUTHORIZE_RESULT: 'skipped', PUBLISH_RESULT: 'skipped', PUBLISH_OUTCOME: '' }, 'success', 'no-change'],
+    ['superseded at publish', { PUBLISH_OUTCOME: 'superseded' }, 'success', 'superseded'],
+    ['superseded at identity', { IDENTITY_SUPERSEDED: 'true', PREPARE_RESULT: 'skipped', AUTHORIZE_RESULT: 'skipped', PUBLISH_RESULT: 'skipped', PUBLISH_OUTCOME: '' }, 'success', 'superseded'],
+    ['a failed preparation', { PREPARE_RESULT: 'failure', AUTHORIZE_RESULT: 'skipped', PUBLISH_RESULT: 'skipped', PUBLISH_OUTCOME: '' }, 'failure', 'failed'],
+    ['a cancelled publish (the watchdog vocabulary has no cancelled: it published nothing)', { PUBLISH_RESULT: 'cancelled', PUBLISH_OUTCOME: '' }, 'cancelled', 'failed'],
+    ['everything skipped (no outcome reached)', { PREPARE_RESULT: 'skipped', AUTHORIZE_RESULT: 'skipped', PUBLISH_RESULT: 'skipped', PUBLISH_OUTCOME: '' }, 'success', 'failed'],
+  ])('%s', (_name, env, conclusion, expected) => {
+    const record = outcome(env);
+    expect(record.conclusion).toBe(conclusion);
+    expect(record.outcome).toBe(expected);
+    expect(['published', 'no-change', 'superseded', 'failed']).toContain(record.outcome);
+    expect(Object.keys(record.jobs)).toEqual(['identity', 'prepare', 'no_change', 'authorize', 'publish']);
+  });
+
+  it('a success conclusion that reached no outcome fails the job loudly', () => {
+    const block = jobBlocks(workflow())['corpus-terminal-outcome'];
+    const guard = block.split('if [[ "$outcome" = failed && "$conclusion" = success ]]; then')[1].split(/\n\s*fi\n/)[0];
+    expect(guard).toContain('::error::');
     expect(guard).toContain('exit 1');
   });
 });
