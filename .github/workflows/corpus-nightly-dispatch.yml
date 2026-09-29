@@ -17,7 +17,7 @@ name: corpus-nightly-dispatch
 # publication still needs the owner-approved preflight artifact this workflow cannot produce.
 #
 # So the permissions here are the floor, not a formality: `contents: read` to read the candidate SHA
-# and version off main, `actions: write` to dispatch. No environment, no secrets, no id-token, no
+# and version off main and the public release assets the approved-runtime resolver verifies, `actions: write` to dispatch. No environment, no secrets, no id-token, no
 # `contents: write`. It cannot sign anything and it cannot publish anything.
 on:
   schedule:
@@ -49,7 +49,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 1
+          # Full history: the approved-runtime resolver proves the release's sourceSha is reachable
+          # from origin/main with `git merge-base --is-ancestor`.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -68,33 +70,77 @@ jobs:
             echo "candidate_version=$candidate_version"
           } >> "$GITHUB_OUTPUT"
       - id: armed
-        name: Stand down until an owner-gated code release has armed unattended promotion
+        name: Stand down unless the owner armed the nightly and an install-verified runtime resolves
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORPUS_NIGHTLY: ${{ vars.CORPUS_NIGHTLY }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          CANDIDATE_VERSION: ${{ steps.candidate.outputs.candidate_version }}
         shell: bash
         run: |
           set -euo pipefail
-          # THE ORDERING, ENFORCED RATHER THAN DOCUMENTED (ADR-086 A7: "step 16 needs an owner-gated
-          # code release installed before step 18 is enabled"). Two independent prerequisites are
-          # satisfied by one artifact: data/approved-runtime.json can only be produced by an
-          # owner-gated code release, and that same release is what carries the client changes an
-          # installed customer needs before a corpus release is usable to them at all. Until it
-          # exists on main, this dispatcher stands DOWN cleanly — it does not fail, because a
-          # correctly-disarmed scheduler is not a broken one, and a nightly red X trains the owner to
-          # ignore the alert that matters.
-          if [[ -s data/approved-runtime.json ]]; then
-            echo 'armed=true' >> "$GITHUB_OUTPUT"
-          else
+          # ADR-0091 D3. Two conditions, both evidence rather than a remembered file:
+          #  1. The owner's kill switch: repository variable CORPUS_NIGHTLY. Only the exact value `on`
+          #     arms it; unset or anything else stands down, so a change to this workflow can never
+          #     arm the nightly by itself. Flipping it needs no code release.
+          #  2. main HEAD IS the approved runtime: the NEWEST vX.Y.Z carries a signed public-verification
+          #     aggregate that verifies against the committed key, and its sourceSha is exactly main HEAD.
+          #     The corpus is built there, so its executables are the install-verified ones by
+          #     construction. There is NO fallback to an older release (independent review of D3,
+          #     2026-09-28): promoting an older runtime over the live code release breaks fresh installs
+          #     and is refused by updated clients. This replaces the old committed-pin-file check, which
+          #     no commit could ever keep valid.
+          # Standing down is not a failure: a correctly-disarmed scheduler is not a broken one, and a
+          # nightly red X trains the owner to ignore the alert that matters. "Not yet verified" (the
+          # newest release has no aggregate yet, or main HEAD is a newer release still being published)
+          # stands down. Evidence that is PRESENT but does not hold (bad signature, digest mismatch,
+          # FAIL verdict) is a loud failure -- never a silent skip.
+          if [[ "${CORPUS_NIGHTLY:-}" != on ]]; then
             echo 'armed=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::corpus-nightly-dispatch is DISARMED: no data/approved-runtime.json on main.'
-            echo '::notice::Unattended corpus promotion begins only after one owner-gated code release'
-            echo '::notice::pins the shipped runtime and is installed-verified. Nothing was dispatched.'
+            echo "::notice::corpus-nightly-dispatch is DISARMED: repository variable CORPUS_NIGHTLY is '${CORPUS_NIGHTLY:-unset}', not 'on'. Nothing was dispatched."
+            exit 0
           fi
+          git fetch --no-tags origin main
+          set +e
+          node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY" \
+            --out "$RUNNER_TEMP/approved-runtime.json" > "$RUNNER_TEMP/approved-release.json"
+          resolve_status=$?
+          set -e
+          if [[ "$resolve_status" -eq 3 ]]; then
+            echo 'armed=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::corpus-nightly-dispatch stands down: the newest code release has not reached install-verified yet (no aggregate). Nothing was dispatched.'
+            exit 0
+          fi
+          if [[ "$resolve_status" -ne 0 ]]; then
+            echo '::error::CORPUS_NIGHTLY is on, but the newest code release carries install-verification evidence that does not hold (reasons above). Refusing; no fallback to an older release.'
+            exit 1
+          fi
+          approved_sha="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').sourceSha")"
+          approved_tag="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').tag")"
+          approved_version="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').version")"
+          if [[ "$approved_sha" != "$CANDIDATE_SHA" ]]; then
+            if [[ "$approved_version" != "$CANDIDATE_VERSION" ]]; then
+              echo 'armed=false' >> "$GITHUB_OUTPUT"
+              echo "::notice::corpus-nightly-dispatch stands down: main HEAD is $CANDIDATE_VERSION, not yet published and install-verified (newest verified release is $approved_tag). Nothing was dispatched."
+              exit 0
+            fi
+            echo "::error::release $approved_tag was verified at $approved_sha, but main HEAD carrying the same version is $CANDIDATE_SHA. Refusing."
+            exit 1
+          fi
+          {
+            echo 'armed=true'
+            echo "approved_sha=$approved_sha"
+            echo "approved_version=$approved_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::armed: building the corpus at approved runtime $approved_tag @ $approved_sha"
 
       - name: Dispatch protected-release.yml on protected main in corpus mode
         if: steps.armed.outputs.armed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
-          CANDIDATE_VERSION: ${{ steps.candidate.outputs.candidate_version }}
+          # Exactly main HEAD, proven above to BE the newest install-verified release's source.
+          CANDIDATE_SHA: ${{ steps.armed.outputs.approved_sha }}
+          CANDIDATE_VERSION: ${{ steps.armed.outputs.approved_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -114,6 +160,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+          APPROVED_SHA: ${{ steps.armed.outputs.approved_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -143,7 +190,8 @@ jobs:
             echo ''
             echo "- target run: [$run_id]($run_url)"
             echo "- event: \`$run_event\`"
-            echo "- candidate: \`$CANDIDATE_SHA\`"
+            echo "- run head (main): \`$CANDIDATE_SHA\`"
+            echo "- corpus built at approved runtime: \`$APPROVED_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Wait for the dispatched corpus run and fail this job if it did not succeed
         # WHY THIS STEP EXISTS, NOT JUST A SUMMARY LINE (found 2026-09-27, live incident review).
