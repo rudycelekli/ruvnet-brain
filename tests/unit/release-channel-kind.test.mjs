@@ -77,15 +77,16 @@ describe('every author-side consumer asks for the CODE generation, not the lates
   // Verified at source before this test existed: each of these compared an npm semver (or the
   // shipping version) against whatever tag held `releases/latest`. Promoting a corpus generation to
   // latest — which ADR-086 S1 REQUIRES, because kb/forge-update.mjs polls exactly that pointer —
-  // makes every one of those comparisons false forever. verify-channels is the worst of them:
-  // release.mjs:547-548 runs it as `runOrDie` in step E, so a successful corpus night would have
-  // failed the OWNER'S OWN release preflight.
+  // makes every one of those comparisons false forever. (scripts/verify-channels.mjs was once the
+  // worst of these — release.mjs ran it as `runOrDie` in check-only mode's step E — but that local
+  // walk was removed 2026-09-26 when check-only mode collapsed onto the one CI-enforced
+  // release-qualification contract; nothing else called it, so the file is gone. Same date,
+  // scripts/release-convergence-watchdog.mjs was deleted: it had no caller anywhere, and
+  // scripts/published-surface-probe.mjs already covers the convergence check below.)
   const CONSUMERS = [
-    'scripts/verify-channels.mjs',
     'scripts/published-surface-probe.mjs',
     'scripts/github-health-watch.mjs',
     'scripts/release-transaction-provider.mjs',
-    'scripts/release-convergence-watchdog.mjs',
     'scripts/release-abort-stale.mjs',
   ];
 
@@ -96,25 +97,8 @@ describe('every author-side consumer asks for the CODE generation, not the lates
     expect(source, `${file} must list releases rather than read the latest pointer`).toContain('releases?per_page=30');
   });
 
-  it('release.mjs still runs verify-channels as a hard preflight gate — the reason this matters', () => {
-    const release = read('scripts/release.mjs');
-    expect(release).toContain("runOrDie('verify-channels', process.execPath, ['scripts/verify-channels.mjs'])");
-  });
-
-  it('keeps releases/latest exactly where it still means "what a customer downloads"', () => {
-    // The customer download path is UNCHANGED and must stay: a corpus generation publishes the
-    // identical asset names (ruvnet-brain.zip + .sig + .sha256), so these checks remain meaningful
-    // whichever kind of release holds the pointer.
-    const channels = read('scripts/verify-channels.mjs');
-    expect(channels).toContain('releases/latest/download/ruvnet-brain.zip');
-    expect(channels).toContain('${bundleUrl}.sig');
-    // …but the version-currency question no longer asks that pointer.
-    expect(channels).not.toContain('api.github.com/repos/${REPO}/releases/latest');
-  });
-
   it.each([
     ['scripts/github-health-watch.mjs', /repos\/\$\{REPO\}\/releases\/latest/],
-    ['scripts/release-convergence-watchdog.mjs', /releases\/latest/],
     ['scripts/release-abort-stale.mjs', /releases\/latest/],
   ])('%s no longer reads the latest pointer at all', (file, pattern) => {
     const executable = read(file).split('\n').filter((line) => !line.trimStart().startsWith('//') && !line.trimStart().startsWith('*')).join('\n');

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   assertBootstrapIdentity,
   assertPathNotOverlapping,
@@ -13,7 +14,13 @@ import {
   pruneIneligibleStores,
   acquireCorpusGeneration,
   acquireSealedGeneration,
+  main,
+  reconcileAndPrepareCorpusCandidate,
   seedPrivateFenceEvidence,
+  summarizeReconciliation,
+  SEED_LEDGER_INCOMPATIBLE_EXIT,
+  SeedLedgerIncompatibleError,
+  seedLedgerIncompatibility,
 } from '../../scripts/corpus-reconcile.mjs';
 
 const temps = [];
@@ -29,6 +36,8 @@ afterEach(() => {
 });
 
 const sha = (char) => char.repeat(40);
+// The envelope every real seed ledger carries (build-bundle.mjs writes it; v4.3.26 ships it).
+const SEED_LEDGER = '{"schemaVersion":2,"kind":"ruvnet-brain-runtime-generation-ledger","stores":{}}';
 const coverage = (rows) => ({ schemaVersion: 1, coverageGeneration: 'generation-1', rows });
 const repo = ({ name, store = name.toLowerCase(), upstream = sha('a'), disposition = 'eligible' }) => ({
   key: `repo:${name}`,
@@ -59,7 +68,7 @@ describe('exact corpus bootstrap identity', () => {
     const extracted = path.join(root, 'extracted');
     const assets = path.join(root, 'assets');
     fs.mkdirSync(path.join(extracted, 'ruvnet-brain'), { recursive: true });
-    fs.writeFileSync(path.join(extracted, 'ruvnet-brain', 'RVF-GENERATIONS.json'), '{"stores":{}}');
+    fs.writeFileSync(path.join(extracted, 'ruvnet-brain', 'RVF-GENERATIONS.json'), SEED_LEDGER);
     fs.writeFileSync(path.join(extracted, 'ruvnet-brain', 'alpha.big.rvf'), 'rvf');
     expect(normalizeExtractedCorpus({ extractedDir: extracted, assetsDir: assets })).toBe(assets);
     expect(fs.existsSync(path.join(assets, 'alpha.big.rvf'))).toBe(true);
@@ -67,8 +76,8 @@ describe('exact corpus bootstrap identity', () => {
     const ambiguous = path.join(root, 'ambiguous');
     fs.mkdirSync(path.join(ambiguous, 'one'), { recursive: true });
     fs.mkdirSync(path.join(ambiguous, 'two'), { recursive: true });
-    fs.writeFileSync(path.join(ambiguous, 'one', 'RVF-GENERATIONS.json'), '{"stores":{}}');
-    fs.writeFileSync(path.join(ambiguous, 'two', 'RVF-GENERATIONS.json'), '{"stores":{}}');
+    fs.writeFileSync(path.join(ambiguous, 'one', 'RVF-GENERATIONS.json'), SEED_LEDGER);
+    fs.writeFileSync(path.join(ambiguous, 'two', 'RVF-GENERATIONS.json'), SEED_LEDGER);
     expect(() => normalizeExtractedCorpus({ extractedDir: ambiguous, assetsDir: path.join(root, 'bad-assets') }))
       .toThrow(/exactly one RVF-GENERATIONS/i);
 
@@ -78,7 +87,7 @@ describe('exact corpus bootstrap identity', () => {
     // canonical fence (copied in by main(), after normalizeExtractedCorpus returns).
     const fenced = path.join(root, 'fenced');
     fs.mkdirSync(fenced, { recursive: true });
-    fs.writeFileSync(path.join(fenced, 'RVF-GENERATIONS.json'), '{"stores":{}}');
+    fs.writeFileSync(path.join(fenced, 'RVF-GENERATIONS.json'), SEED_LEDGER);
     fs.writeFileSync(path.join(fenced, 'alpha.big.rvf'), 'rvf');
     fs.writeFileSync(path.join(fenced, 'PRIVATE-STORES.json'), '{"privateStores":["secret"]}');
     const fencedAssets = path.join(root, 'fenced-assets');
@@ -90,6 +99,55 @@ describe('exact corpus bootstrap identity', () => {
     });
     // No historical fence at all: evidence is simply absent, never fabricated.
     expect(seedPrivateFenceEvidence(assets)).toBeNull();
+  });
+});
+
+// ADR-0091 D4: the one seed property that cannot be judged before download is the generation ledger's
+// schema (it lives only inside the archive). It is checked right after extraction, before anything is
+// moved, and reported as a DISTINCT failure so corpus-seed.yml can retry once from the bootstrap.
+describe('seed ledger schema is checked after extraction (ADR-0091 D4)', () => {
+  const extractedWith = (ledgerText) => {
+    const root = temp();
+    const extracted = path.join(root, 'extracted');
+    fs.mkdirSync(path.join(extracted, 'ruvnet-brain'), { recursive: true });
+    fs.writeFileSync(path.join(extracted, 'ruvnet-brain', 'RVF-GENERATIONS.json'), ledgerText);
+    fs.writeFileSync(path.join(extracted, 'ruvnet-brain', 'alpha.big.rvf'), 'rvf');
+    return { extracted, assets: path.join(root, 'assets') };
+  };
+
+  it.each([
+    ['a schema-1 ledger', '{"schemaVersion":1,"stores":{}}', /schemaVersion 1 kind null; this runtime reads schemaVersion 2 kind ruvnet-brain-runtime-generation-ledger/],
+    ['a future schema-3 ledger', '{"schemaVersion":3,"kind":"ruvnet-brain-runtime-generation-ledger","stores":{}}', /schemaVersion 3/],
+    ['the public-ledger kind', '{"schemaVersion":2,"kind":"ruvnet-brain-public-generation-ledger","stores":{}}', /kind "ruvnet-brain-public-generation-ledger"/],
+    ['a ledger with no stores object', '{"schemaVersion":2,"kind":"ruvnet-brain-runtime-generation-ledger","stores":[]}', /no stores object/],
+    ['an unreadable ledger', '{not json', /unreadable/],
+  ])('%s is refused as SeedLedgerIncompatibleError and NOTHING is moved', (_name, ledgerText, message) => {
+    const { extracted, assets } = extractedWith(ledgerText);
+    let caught;
+    try { normalizeExtractedCorpus({ extractedDir: extracted, assetsDir: assets }); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(SeedLedgerIncompatibleError);
+    expect(caught.message).toMatch(message);
+    expect(fs.existsSync(assets)).toBe(false);
+    expect(fs.existsSync(path.join(extracted, 'ruvnet-brain', 'alpha.big.rvf'))).toBe(true);
+  });
+
+  it('accepts exactly the envelope build-bundle writes', () => {
+    expect(seedLedgerIncompatibility(JSON.parse(SEED_LEDGER))).toBeNull();
+  });
+
+  it('moves every top-level entry whole, runtime files and directories included -- no strip step (0.1.0 withdrawn)', () => {
+    const { extracted, assets } = extractedWith(SEED_LEDGER);
+    const rootDir = path.join(extracted, 'ruvnet-brain');
+    for (const dir of ['keys', 'primer', 'l2']) {
+      fs.mkdirSync(path.join(rootDir, dir), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, dir, 'x.txt'), dir);
+    }
+    fs.writeFileSync(path.join(rootDir, 'capability-cards.md'), '# cards');
+    fs.writeFileSync(path.join(rootDir, 'forge-ask.mjs'), 'export {};');
+    normalizeExtractedCorpus({ extractedDir: extracted, assetsDir: assets });
+    expect(fs.readdirSync(assets).sort()).toEqual(
+      ['RVF-GENERATIONS.json', 'alpha.big.rvf', 'capability-cards.md', 'forge-ask.mjs', 'keys', 'l2', 'primer']);
+    expect(fs.readFileSync(path.join(assets, 'l2', 'x.txt'), 'utf8')).toBe('l2');
   });
 });
 
@@ -375,11 +433,34 @@ describe('candidate preparation', () => {
       candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
       receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
       coverageFile: path.join(root, 'data', 'source-coverage.json'),
-      coverage: coverageFixture('CURRENT'), accuracyStores: 2, accuracySample: 5, run,
+      coverage: coverageFixture('CURRENT'), accuracyStores: 2, accuracySamplePerPartition: 5, run,
     });
     const benchmark = calls.map((call) => call.join(' ')).find((call) => /retrieval-accuracy\.mjs/.test(call));
     expect(benchmark).toMatch(/--stores 2/);
     expect(benchmark).toMatch(/--sample 5/);
+  });
+
+  // ADR-0091 D2: accuracySample (CLI --accuracy-sample) is the whole-oracle question sample.
+  it('accuracySample forwards --sample-questions, and omitting it runs the full, unsampled C3', () => {
+    const root = candidateRoot();
+    const benchmarkFor = (extra) => {
+      const calls = [];
+      const run = (command, args) => { calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
+      prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run, ...extra,
+      });
+      return calls.map((call) => call.join(' ')).find((call) => /retrieval-accuracy\.mjs/.test(call));
+    };
+    const sampled = benchmarkFor({ accuracySample: 80 });
+    expect(sampled).toMatch(/--sample-questions 80/);
+    expect(sampled).not.toMatch(/--sample 80/);
+    const full = benchmarkFor({});
+    expect(full).not.toMatch(/--sample/);
+    expect(full).not.toMatch(/--stores/);
   });
 
   it('rejects a coverage object that is missing or not the real coverage shape', () => {
@@ -390,6 +471,127 @@ describe('candidate preparation', () => {
       receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
       coverageFile: path.join(root, 'data', 'source-coverage.json'),
     })).toThrow(/already-measured coverage object/i);
+  });
+
+  // ADR-086 amendment (2026-09-15, commit a20727b7): C3's low score no longer blocks a corpus build.
+  // scripts/corpus-candidate.mjs, scripts/release.mjs, and corpus-seed.yml all switched to
+  // readDiagnosticAccuracyReport, which checks the report's integrity/archive binding, never its
+  // score -- prepareCorpusCandidate was the one caller still missed, so it kept throwing on any
+  // nonzero C3 exit and every full corpus build died there. These tests pin the fixed behavior: a
+  // crashed measurement (no valid, archive-bound report) stays fatal; a low score does not.
+  describe('C3 retrieval-accuracy is advisory, not blocking (ADR-086 amendment completion)', () => {
+    // Builds a `run` mock that behaves like the real tool chain: the build-bundle.mjs call actually
+    // writes bytes to the bundle zip (so fileIdentity(bundleFile) has something real to hash), and the
+    // retrieval-accuracy.mjs call is intercepted so the test controls both its exit status and
+    // whatever report file (if any) it leaves behind.
+    const mockRun = ({ accuracyStatus, writeReport }) => {
+      const calls = [];
+      const run = (command, args) => {
+        calls.push([command, ...args]);
+        if (args.some((a) => /build-bundle\.mjs$/.test(a))) {
+          const outIndex = args.indexOf('--out');
+          const bundleFile = `${args[outIndex + 1]}.zip`;
+          fs.mkdirSync(path.dirname(bundleFile), { recursive: true });
+          fs.writeFileSync(bundleFile, 'fixture-archive-bytes');
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        if (args.some((a) => /oracle\/retrieval-accuracy\.mjs$/.test(a))) {
+          const bundleIndex = args.indexOf('--bundle');
+          const outIndex = args.indexOf('--out');
+          const bundleFile = args[bundleIndex + 1];
+          const reportFile = args[outIndex + 1];
+          if (writeReport) writeReport({ bundleFile, reportFile });
+          if (accuracyStatus !== 0) return { status: accuracyStatus, stdout: '', stderr: 'C3 below threshold' };
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      };
+      return { run, calls };
+    };
+
+    const validReportFor = (bundleFile) => {
+      const identity = { file: path.basename(bundleFile), sha256: crypto.createHash('sha256').update(fs.readFileSync(bundleFile)).digest('hex'), bytes: fs.statSync(bundleFile).size };
+      return {
+        schemaVersion: 2, kind: 'ruvnet-brain-retrieval-accuracy', state: 'FAIL', classification: 'diagnostic',
+        c3Eligible: false, archive: { sha256: identity.sha256, bytes: identity.bytes, file: identity.file },
+        oracle: {}, generator: {}, totals: { n: 1152, successes: 680 },
+      };
+    };
+
+    it('C3 exits nonzero but writes a valid report bound to this archive: reconcile proceeds', () => {
+      const root = candidateRoot();
+      const { run, calls } = mockRun({
+        accuracyStatus: 1,
+        writeReport: ({ bundleFile, reportFile }) => fs.writeFileSync(reportFile, JSON.stringify(validReportFor(bundleFile))),
+      });
+      const result = prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      });
+      // Proceeded all the way through the receipt build + verify steps that run AFTER the C3 call.
+      const joined = calls.map((call) => call.join(' '));
+      expect(joined.some((call) => /corpus-candidate\.mjs .*--verify/.test(call))).toBe(true);
+      expect(result.accuracyReportFile).toBe(path.join(root, 'candidate', 'ruvnet-brain.zip.accuracy.json'));
+    });
+
+    it('C3 exits nonzero with no report file at all: reconcile throws', () => {
+      const root = candidateRoot();
+      const { run } = mockRun({ accuracyStatus: 1 });
+      expect(() => prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      })).toThrow(/crashed with no valid report/i);
+    });
+
+    it('C3 exits nonzero with a report bound to a DIFFERENT archive: reconcile throws', () => {
+      const root = candidateRoot();
+      const { run } = mockRun({
+        accuracyStatus: 1,
+        writeReport: ({ reportFile }) => {
+          // Build a report bound to bytes that are NOT the real bundle's bytes.
+          const decoyFile = path.join(root, 'decoy-archive.zip');
+          fs.writeFileSync(decoyFile, 'not-the-real-archive');
+          fs.writeFileSync(reportFile, JSON.stringify(validReportFor(decoyFile)));
+        },
+      });
+      expect(() => prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir: path.join(root, 'candidate', 'ruvnet-brain'),
+        receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      })).toThrow(/crashed with no valid report|not bound to this exact final archive/i);
+    });
+
+    it('deletes any stale leftover .accuracy.json before invoking the benchmark, so it cannot be mistaken for a fresh report', () => {
+      const root = candidateRoot();
+      const candidateDir = path.join(root, 'candidate', 'ruvnet-brain');
+      const staleReportFile = `${candidateDir}.zip.accuracy.json`;
+      fs.mkdirSync(path.dirname(staleReportFile), { recursive: true });
+      fs.writeFileSync(staleReportFile, JSON.stringify({ stale: true }));
+      let sawStaleAtInvocationTime = null;
+      const { run } = mockRun({
+        accuracyStatus: 0,
+        writeReport: ({ reportFile }) => {
+          sawStaleAtInvocationTime = fs.existsSync(reportFile);
+          fs.writeFileSync(reportFile, JSON.stringify({ fresh: true }));
+        },
+      });
+      prepareCorpusCandidate({
+        root, assetsDir: path.join(root, 'assets'), builderSha: sha('e'),
+        candidateDir, receiptFile: path.join(root, 'evidence', 'corpus-receipt.json'),
+        coverageFile: path.join(root, 'data', 'source-coverage.json'),
+        coverage: coverageFixture('CURRENT'), run,
+      });
+      expect(sawStaleAtInvocationTime).toBe(false);
+      expect(JSON.parse(fs.readFileSync(staleReportFile, 'utf8'))).toEqual({ fresh: true });
+    });
   });
 });
 
@@ -679,17 +881,138 @@ describe('legacy provenance is preserved distinctly from current-round rebuilds 
 });
 
 describe('standalone workflow boundary', () => {
-  it('binds preparation to exact main SHA/tag/digest and leaves publication to protected-release', () => {
+  it('binds preparation to the exact current-main SHA, which must BE the resolved approved SHA, plus tag/digest, and leaves publication to protected-release', () => {
     const workflow = fs.readFileSync(path.resolve('.github/workflows/corpus-seed.yml'), 'utf8');
     expect(workflow).toContain('candidate_sha:');
     expect(workflow).toContain('seed_tag:');
     expect(workflow).toContain('seed_sha256:');
     expect(workflow).toContain('ref: ${{ inputs.candidate_sha }}');
-    expect(workflow).toContain('git rev-parse origin/main');
+    // Independent review of ADR-0091 D3 (2026-09-28): EXACTLY origin/main, never merely reachable from it,
+    // AND the newest install-verified release's sourceSha (ADR-0091 D3).
+    expect(workflow).toContain('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+    expect(workflow).not.toContain('merge-base --is-ancestor');
+    expect(workflow).toContain('node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY"');
+    expect(workflow).toContain('test "$approved_sha" = "$EXPECTED_SHA"');
     expect(workflow).toContain('gh release download "$SEED_TAG"');
     expect(workflow).toContain('node scripts/corpus-reconcile.mjs');
     expect(workflow).toContain('kb/PRIVATE-STORES.json');
     expect(workflow).not.toMatch(/releases\/latest|download\/latest|\brelease create\b|node scripts\/corpus-seed-publish\.mjs/);
     expect(workflow).toMatch(/protected-release\.yml/);
+  });
+});
+
+// ADR-0091 D1. main()'s last line read `reconciliation.rounds` for weeks after cd0f032f renamed the
+// history to `attempts`, so every corpus-publish run threw "Cannot read properties of undefined
+// (reading 'flatMap')" AFTER acquiring the whole generation. Nothing called main(), so nothing noticed.
+// This drives main() end to end: a real seed zip, the real bootstrap identity check, extraction,
+// normalization, fence copy and input sync, then the REAL reconcileAndPrepareCorpusCandidate over the
+// REAL acquireSealedGeneration -- so the history main() summarizes is shaped by its actual producer,
+// not by a hand-written fixture. Only network observation, cloning/embedding and assembly are stubbed.
+describe('main() end to end (ADR-0091 D1)', () => {
+  const seedFixture = ({ ledgerText = SEED_LEDGER } = {}) => {
+    const dir = temp();
+    const root = path.join(dir, 'checkout');
+    fs.mkdirSync(path.join(root, 'kb'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'kb', 'PRIVATE-STORES.json'), '{"privateStores":[]}');
+    fs.writeFileSync(path.join(root, 'kb', 'external-sources.json'), '{"sources":[]}');
+    fs.writeFileSync(path.join(root, 'kb', 'no-corpus-repos.json'), '{"repos":[]}');
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(path.join(stage, 'ruvnet-brain'), { recursive: true });
+    fs.writeFileSync(path.join(stage, 'ruvnet-brain', 'RVF-GENERATIONS.json'), ledgerText);
+    fs.writeFileSync(path.join(stage, 'ruvnet-brain', 'alpha.big.rvf'), 'seed rvf bytes');
+    const archive = path.join(dir, 'seed.zip');
+    execFileSync('zip', ['-q', '-r', archive, 'ruvnet-brain'], { cwd: stage });
+    const digest = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
+    const argv = ['--root', root, '--seed-archive', archive, '--seed-tag', `corpus-sha256-${digest}`,
+      '--seed-sha256', digest, '--assets', path.join(dir, 'assets'), '--workspace', path.join(dir, 'workspace'),
+      '--builder-sha', sha('f')];
+    return { dir, root, argv, assets: path.join(dir, 'assets') };
+  };
+
+  // One stale eligible repository: attempt 1 plans it, "refreshes" it into the ledger, and the settled
+  // coverage then reports it CURRENT, so the real sealed-generation loop accepts on its first attempt.
+  const drive = () => {
+    const ledger = { stores: {} };
+    const row = () => ({ ...repo({ name: 'alpha', upstream: sha('a') }),
+      status: ledger.stores.alpha ? 'CURRENT' : 'STALE' });
+    const seen = {};
+    const reconcileAndPrepare = (options) => reconcileAndPrepareCorpusCandidate({
+      ...options,
+      reconcile: ({ maxAttempts }) => acquireSealedGeneration({
+        maxAttempts,
+        observe: async () => ({ observationSha256: 'b'.repeat(64) }),
+        build: async () => coverage([row()]),
+        readLedger: () => ledger,
+        execute: async (plan) => {
+          for (const entry of plan) ledger.stores[entry.store] = { sourceCommit: entry.upstreamSha };
+          return { refreshed: plan.map((entry) => entry.store) };
+        },
+        prune: async () => ({ pruned: ['retired-store'] }),
+        rebuild: async () => ({ rebuilt: ['concepts', 'ruv-gists'] }),
+      }),
+      normalizeUpdaters: (input) => { seen.refreshedStores = input.refreshedStores; return { missing: [] }; },
+      prepare: () => ({ bundleFile: 'candidate.zip', receiptFile: 'candidate.receipt.json' }),
+    });
+    return { reconcileAndPrepare, seen };
+  };
+
+  it('completes, exits 0 and prints the plan summarized from the real acquisition history', async () => {
+    const fixture = seedFixture();
+    const { reconcileAndPrepare, seen } = drive();
+    let printed = '';
+    const code = await main(fixture.argv, { reconcileAndPrepare, stdout: { write: (text) => { printed += text; } } });
+
+    expect(code).toBe(0);
+    const output = JSON.parse(printed);
+    expect(output.ok).toBe(true);
+    expect(output.plan).toEqual([expect.objectContaining({ store: 'alpha', upstreamSha: sha('a'), reason: 'missing ledger receipt' })]);
+    expect(output.reconciliation.attempts).toHaveLength(1);
+    expect(output.bundleFile).toBe('candidate.zip');
+    // The updater normalization step reads the same history through the same reader.
+    expect(seen.refreshedStores).toEqual(['alpha']);
+    // The real bootstrap steps ran before reconciliation, not a shortcut around them.
+    expect(fs.existsSync(path.join(fixture.assets, 'PRIVATE-STORES.json'))).toBe(true);
+    expect(fs.existsSync(path.join(fixture.assets, 'external-sources.json'))).toBe(true);
+    expect(fs.readFileSync(path.join(fixture.assets, 'alpha.big.rvf'), 'utf8')).toBe('seed rvf bytes');
+  });
+
+  it('summarizeReconciliation reads every attempt, and names a result that has no attempts array', async () => {
+    const history = { observation: { observationSha256: 'c'.repeat(64) }, attempts: [
+      { plan: [{ store: 'alpha' }], refreshed: ['alpha'], pruned: [], rebuilt: [] },
+      { plan: [{ store: 'beta' }], refreshed: ['beta'], pruned: ['old'], rebuilt: ['concepts'] },
+    ] };
+    expect(summarizeReconciliation(history)).toEqual({
+      attempts: 2, observationSha256: 'c'.repeat(64),
+      plan: [{ store: 'alpha' }, { store: 'beta' }], refreshed: ['alpha', 'beta'], pruned: ['old'], rebuilt: ['concepts'],
+    });
+    // The pre-cd0f032f shape must fail by name, never as a bare TypeError at the end of a generation.
+    expect(() => summarizeReconciliation({ observation: {}, rounds: [] }))
+      .toThrow(/no attempts array \(keys: observation, rounds\)/);
+  });
+
+  it(`exits ${SEED_LEDGER_INCOMPATIBLE_EXIT} on an incompatible seed ledger, before reconciling, with --assets left untouched (ADR-0091 D4)`, async () => {
+    const fixture = seedFixture({ ledgerText: '{"schemaVersion":1,"stores":{}}' });
+    let reconciled = false;
+    let err = '';
+    const code = await main(fixture.argv, {
+      reconcileAndPrepare: () => { reconciled = true; throw new Error('must not reconcile an unconsumable seed'); },
+      stdout: { write: () => {} }, stderr: { write: (text) => { err += text; } },
+    });
+    expect(SEED_LEDGER_INCOMPATIBLE_EXIT).toBe(3);
+    expect(code).toBe(3);
+    expect(reconciled).toBe(false);
+    expect(err).toMatch(/seed ledger is incompatible with this runtime: RVF-GENERATIONS\.json is schemaVersion 1/);
+    expect(err).toMatch(/exiting 3 so the caller can fall back to the committed bootstrap seed/);
+    // The same --assets path is immediately reusable by the bootstrap retry, and no extraction debris is left.
+    expect(fs.existsSync(fixture.assets)).toBe(false);
+    expect(fs.readdirSync(fixture.dir).filter((name) => name.startsWith('.corpus-seed-extract-'))).toEqual([]);
+
+    // ...and the retry: the same main(), same --assets, now a compatible seed, runs to completion.
+    const retry = seedFixture();
+    const { reconcileAndPrepare } = drive();
+    const argv = [...retry.argv];
+    argv[argv.indexOf('--assets') + 1] = fixture.assets;
+    expect(await main(argv, { reconcileAndPrepare, stdout: { write: () => {} } })).toBe(0);
+    expect(fs.readFileSync(path.join(fixture.assets, 'alpha.big.rvf'), 'utf8')).toBe('seed rvf bytes');
   });
 });

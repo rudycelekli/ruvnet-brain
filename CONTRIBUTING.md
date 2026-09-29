@@ -1,175 +1,162 @@
-# Contributing to RuvNet Brain
+# Contributing to RuvNet Brain — the one rulebook
 
-Updated: 2026-08-22
+Updated: 2026-09-28
 Created: 2026-07-07
 
-Thanks for helping improve the brain. This guide is the practical map of how the repo is built,
-tested, versioned, and published. Everything here is accurate to the scripts in `scripts/` and
-`kb/` — when in doubt, read the script (each one has a header comment explaining exactly what it does).
+This file is the **only** place that says how to version, release, update the knowledge corpus,
+and what the hooks do. `CLAUDE.md`, `AGENTS.md`, skills and memory point here instead of restating
+it. ADRs in `docs/adr/` record *why* a decision was made; they are history, not operating
+instructions. `npm run single-source:check` fails CI if a second, conflicting instruction appears.
 
-## Prerequisites
+## The rules at a glance
 
-- **Node.js ≥ 18** (see `engines` in `package.json`).
-- **git** and, for publishing, the **`gh`** GitHub CLI.
-- A **local ONNX model cache** for the embedders. Point `KB_MODEL_CACHE` at a warm cache dir to
-  avoid a first-run download of `Xenova/all-MiniLM-L6-v2` (384-dim) and the bge-768 model:
-  ```bash
-  export KB_MODEL_CACHE=/path/to/models-cache
-  ```
-  If unset, the build scripts default to a repo-local `kb/models-cache` and download on demand.
-
-The heavy vector artifacts (`kb/*.rvf`, `kb/*.big.rvf`) ship via GitHub Releases, **not** git — a
-fresh clone is lightweight, and end users get the ~512 MB bundle through `npx ruvnet-brain`.
-
-## What the pieces are
-
-| Area | Where | Purpose |
+| Job | The only way | Proof it worked |
 |---|---|---|
-| The brain (query-time) | `kb/` | Per-repo `.rvf` (MiniLM-384) + `.big.rvf` (bge-768) stores, full-passage sidecars, symbol indexes, primers, the concepts store, and the `forge-*` query tools (CLI `forge-ask-all.mjs` + MCP `forge-mcp-all.mjs` / `search_ruvnet`). |
-| The plugin | `plugin/` | Claude Code plugin: MCP server, grounding skill, the three hooks (`session-start.sh`, `ground-ruvnet.sh`, `hijack-ruvnet.sh`), marketplace manifest, and the test suite. |
-| Build / publish tooling | `scripts/` | The pipeline below. |
-| Coverage registry | `data/registry.tiers.json`, `data/manifest.json` | Which repos are in scope (T0–T3) and what was actually built (per-repo commit SHA, coverage counts). |
-| Author rebuild guard | `scripts/worktree-integrity.mjs` | Refuses source mutation outside a clean linked worktree and seals the primary checkout around the run. |
+| Change code or docs | Work on a branch; land it on a `release/X.Y.Z` branch. Nothing is pushed to `main` directly. | `release-candidate-preflight` green on that SHA |
+| Set the version | `npm run version:set -- X.Y.Z` (first commit of the release branch) | `npm run version:check` exits 0 |
+| Release code | Preflight → fast-forward `main` → dispatch `protected-release.yml mode=code` → owner approves the `Production – ruvnet-brain` deployment | Terminal receipt `install-verified` on Linux, macOS, Windows; npm `latest` = GitHub `releases/latest` = `main` |
+| Build the customer corpus | CI only: `corpus-seed.yml` → `scripts/corpus-reconcile.mjs` | Sealed candidate + receipt artifact |
+| Publish the corpus | `protected-release.yml mode=corpus` (nightly dispatcher), armed only while repository variable `CORPUS_NIGHTLY` is `on` **and** `main` HEAD is itself the newest code release and that release is `install-verified` (resolved at run time, `scripts/approved-runtime.mjs --resolve`; never a committed file, never a fallback to an older release); the corpus is built at that commit | `corpus-sha256-*` release promoted to `releases/latest` |
+| Update a user's machine | One owner per machine: the Brain's scheduler (`npx ruvnet-brain --enable-nightly`) **or** agentic-kit (`ak sync`) — never both | `SOURCE.json` `releaseTag` equals the plugin version; latest `~/.cache/ruvnet-brain/refresh-runs/*.json` is PASS |
 
-## Building the brain (scripts/ overview)
+Nothing else publishes. `scripts/release-authority.mjs` fails CI if any file other than
+`scripts/release.mjs` / `scripts/release-transaction-provider.mjs` contains a publish operation, and
+`prepublishOnly` refuses `npm publish` outside the protected workflow.
 
-The expensive work happens **once, at build time**. The pipeline, in the order it runs:
+## Versioning
 
-1. **Embed a repo** — `kb/forge-build.mjs` deep-walks a cloned repo (whole files, full function
-   bodies) and embeds it into the MiniLM-384 store; `kb/forge-big.mjs both` re-embeds the same
-   passages into the bge-768 (`*.big.rvf`) store. `scripts/build-symbols.mjs` adds a symbol index.
-2. **Concepts / capability layer** — `scripts/build-concepts.mjs` (capability cards + L2), plus
-   `scripts/build-primer.mjs` and `scripts/build-l2.mjs` for per-repo prose. These let the model
-   ground *capability* claims and route a described need to the right repo, not just do file lookups.
-3. **Stamp** — `scripts/brain-stamp.mjs` writes `data/manifest.json` (build date + per-repo commit
-   SHA + coverage counts) and injects the stamp into the primer header and each store's `SOURCE.json`.
-4. **Assemble the shippable bundle** — `scripts/build-bundle.mjs` copies the query-time artifacts
-   into `dist/ruvnet-brain/`, applying the private-store fence (see below).
-5. **Prove it** — the test/grading scripts (`scripts/gate.sh`, `scripts/prove.mjs`,
-   `scripts/behavioral-l1-l4.mjs`, `scripts/brain-capability-check.mjs`,
-   `scripts/brain-grade-groundtruth.mjs`, and `plugin/test/run-tests.mjs`).
+- The one hand-set number is `plugin/.claude-plugin/plugin.json` `version`; set it only with
+  `npm run version:set -- X.Y.Z`, which also rewrites every generated surface (package.json, lockfile,
+  manifest, kb/package.json, primer, explainer, README badge) and runs `version:check`.
+- Only plain `X.Y.Z` versions can be published (`scripts/protected-release-invocation.mjs`).
+- Why `main` never moves except by release: the Claude Code plugin installs from `./plugin` on the
+  default branch (`.claude-plugin/marketplace.json`). Every commit on `main` must therefore be a
+  released version, or plugin users receive changes with no version signal.
 
-`scripts/gen-images.mjs` regenerates the explainer/diagram assets. `scripts/version.mjs` /
-`scripts/sync-version.mjs` handle versioning (see below).
-
-## Adding a repo to the brain
-
-To pull any `github.com/ruvnet/<name>` repo (or a rUv-collaborator org repo) into the brain **on
-demand**:
+## Releasing code (step by step)
 
 ```bash
-node scripts/ingest-repo.mjs --name <repo> [--org <github-org>]
+git switch -c release/X.Y.Z origin/main
+npm run version:set -- X.Y.Z && npm run convergence:write      # commit these first
+# …merge the reviewed work for this release onto the branch…
+npm test && npx vitest run && npm run single-source:check    # both suites assert different things
+git push origin release/X.Y.Z                                # triggers release-candidate-preflight
 ```
 
-`--org` defaults to `ruvnet`; pass it to ingest an ecosystem repo that lives in a collaborator org
-(e.g. `--name agentic-qe --org proffesor-for-testing`). This clones (shallow), embeds both variants
-(MiniLM-384 then bge-768), and builds the symbol index. The new `<name>.rvf` is discovered at query
-time by `search_ruvnet` / `forge-ask-all`, so it is **searchable immediately — no server restart**.
+1. Wait for `release-candidate-preflight` to pass on the exact SHA. Any source change repeats it.
+2. Open a PR `release/X.Y.Z → main` for review and required checks. **Never click Merge, Squash or
+   Rebase** — each creates a new SHA the publisher will refuse.
+3. Promote with a normal fast-forward: confirm `origin/main` is an ancestor, then
+   `git push origin "$SHA:refs/heads/main"` and confirm the remote ref equals `$SHA`. Never force.
+4. Dispatch: `gh workflow run protected-release.yml -f mode=code -f candidate_sha=$SHA -f version=X.Y.Z`.
+5. The owner approves the `Production – ruvnet-brain` deployment in GitHub (required reviewer).
+6. Done means the terminal `install-verified` receipt: all public OS × host combinations verified.
+   Anything short of that is "published, not verified". Recovery/abandon rails:
+   `recover-public-verification.yml`, `abandon-public-verification.yml` (manual `repository_dispatch`),
+   `npm run release-abort-stale`.
 
-For full capability-confidence on the new repo (so it's never wrongly doubted), also build its
-primer + refresh the concepts store afterward:
+`npm run release:qualify` is the one definition of "qualified"; CI and local checks both use it.
+
+## The knowledge corpus
+
+**Built in CI only.** `corpus-seed.yml` observes every public rUv repository (exclusions are
+recorded in `data/source-coverage.json`), reconciles changed repos against the previous published
+generation with `scripts/corpus-reconcile.mjs`, and seals a candidate. It cannot publish. Gists are
+captured by `scripts/gist-receipts.mjs` (the single gist pipeline). The job needs the repository
+secret `RUVNET_GISTS_TOKEN` (a GitHub token with no scopes) — without it, gist listing falls back
+to anonymous API calls and is rate-limited.
+
+**Published nightly, only when armed.** `corpus-nightly-dispatch.yml` (07:17 UTC) dispatches
+`protected-release.yml mode=corpus`, which signs and promotes a `corpus-sha256-*` release. It stands
+down unless the repository variable `CORPUS_NIGHTLY` is exactly `on` (the owner's kill switch; unset
+means off, and flipping it needs no code release) **and** an approved runtime resolves.
+The approved runtime is never committed: `node scripts/approved-runtime.mjs --resolve` takes the newest
+`vX.Y.Z` release only, requires its signed `public-verification-aggregate.json` to verify against
+`keys/ruvnet-brain-signing.pub.pem`, and rebuilds the runtime pin from that release's own zip
+(ADR-0091 D3). It never falls back to an older release: promoting an older runtime over the live code
+release breaks fresh installs. No aggregate yet = the nightly stands down (exit 3); an aggregate that
+does not verify = a loud failure. The corpus is built at that release's source commit, which must be
+exactly `main` HEAD, and its executables are the install-verified ones byte for byte. Never commit `data/approved-runtime.json`; `single-source:check`
+C1 fails if one appears.
+
+**Local ingestion is for development.** `node scripts/ingest-repo.mjs --name <repo> [--org <org>]`
+makes a repo searchable on *this* machine immediately. It never reaches users; a repo reaches users
+by being in scope of the CI build above. `ingest-repo.mjs` itself now stamps
+`updateManaged:false` + `origin:'local-ingest'` into the store's own `SOURCE.json` entry, via
+`scripts/private-overlay.mjs`'s writer (`--from` pointed at the same root the bytes already landed
+in, which degenerates the writer to registry-stamping only) — so a repo pulled in this way survives
+the updater exactly like a genuinely private store, instead of reading as an ordinary public store
+that the next `--apply` silently deletes because it is absent from the incoming bundle. It also adds
+the store to `kb/PRIVATE-STORES.json`'s fence (required for that stamp — see below) and, in the same
+pass, retroactively re-stamps any OTHER name `kb/local-ingests.json`'s own recipe ledger already
+recorded but that predates this fix. Private stores that arrive as pre-built sidecars are still
+installed the same way: `npm run private-overlay -- --root <kbDir> --from <dir> --store <name>`.
+`scripts/self-update.mjs` / `scripts/nightly-wrapper.sh` are manual author diagnostics in a clean
+linked worktree; they never publish.
+
+**How a user's machine updates.** `npx ruvnet-brain --update` runs the signed updater
+(`kb/forge-update.mjs --apply`): it verifies the bundle signature and preserves private/local-ingest
+stores through `restorePrivateFilesIntoCandidate` — the ONE place production code copies a private
+overlay onto a candidate tree, shared by the normal update path and the authenticated staged-recovery
+rail (`applyVerifiedStagedRelease`, `--staged-release`) a failed normal update falls back to for a
+private-overlay install rather than the unconditional fresh reinstall that used to refuse outright on
+one. Currency is ONE recorded verdict (`kb/forge-update.mjs`'s `currencyVerdict()`): CURRENT (nothing
+to do), UPDATE_AVAILABLE (a genuinely newer code or corpus release), UNKNOWN (no verifiable ordering
+key — apply is allowed, never blocked, never claimed current; today's pre-generation-stamp installs
+read this way), or REFUSED (rollback protection — the offered corpus generation is strictly OLDER
+than the one installed; no download, live untouched, clean exit). `--check`, `--apply`,
+`bin/install.mjs`'s update path, and the SessionStart banner's install-alarm all read this SAME
+recorded verdict rather than each re-deriving their own comparison. Schedule it with
+`npx ruvnet-brain --enable-nightly` (launchd, cron or Task Scheduler — the same command on every OS).
+Machines managed by agentic-kit are updated by `ak sync` instead, which disables the Brain's own
+scheduler on purpose; do not run both. `--host-sync-only` repairs host wiring and **never** updates
+knowledge — do not use it as an update command.
+
+**Provenance (one ledger, one projection).** `kb/RVF-GENERATIONS.json` is the one per-store
+provenance record; `kb/SOURCE.json` is generated as a projection of it, never written
+independently. Before this, two incompatible "schemaVersion 2" ledger shapes existed side by
+side: **Schema A** (`scripts/rvf-generation.mjs`'s own pre-existing shape — no `kind`, no
+`sourceSnapshot`) and **Schema B** (`scripts/build-bundle.mjs`'s release-time `projectStoreViews`
+shape — `kind` + `sourceSnapshot`, already required by `plugin/scripts/coverage-integrity.mjs`'s
+release validation). Schema B was picked as canonical (it was already load-bearing for release
+validation); `scripts/rvf-generation.mjs` now emits it directly
+(`RUNTIME_LEDGER_KIND = 'ruvnet-brain-runtime-generation-ledger'`, `sourceSnapshot` carried
+forward or `null` until a release stamps it for real). `scripts/rvf-generation.mjs`'s
+`projectSourceStore(name, generation, updater)` is the one place identity fields
+(`sourceRepo`/`sourceCommit`/`sourceDescribe`/`builtUtc`) are read FROM the ledger; all four
+SOURCE.json writers (`kb/forge-build.mjs`, `kb/forge-refresh.mjs`, `scripts/corpus-reconcile.mjs`,
+`scripts/private-overlay.mjs`) call it rather than restating those facts as their own object
+literals. `tests/unit/one-source-projection.test.mjs` enforces this by census (grep) and by an
+exact ledger-to-SOURCE.json equality proof. The old one-shot migration
+`scripts/stamp-existing-rvf-generations.mjs` went dead as a result and was deleted.
+
+## Hooks (what runs automatically)
+
+Project-level hooks are empty. The installed plugin registers exactly the hooks in
+`plugin/hooks/hooks.json` (Codex: `plugin/hooks/codex-hooks.json`), all dispatched through
+`plugin/scripts/hook-shim.mjs`: SessionStart restore; UserPromptSubmit grounding + advisories;
+PreToolUse `decision-gate` on file writes (the only hook that may refuse, for rUv-product code
+without a fresh `search_ruvnet`); PostToolUse grounding stamp; Stop continuation and grounding
+check; snapshot capture on Stop/PreCompact/SessionEnd. `npm run hooks:check` and
+`npm run wired:check` fail on any hook or module that is registered-but-missing or present-but-unwired.
+
+## Tests
 
 ```bash
-node scripts/build-primer.mjs --name <name> --variant big
-node scripts/build-concepts.mjs && node kb/forge-big.mjs both --dir kb --name concepts
+npm test                        # plugin battery over real JSON-RPC
+npx vitest run                  # unit + integration
+npm run qa:release              # release-scope checks
+npm run single-source:check     # one version of every rule and fact
+npm run wired:check             # every module has a caller or a stated reason
 ```
-
-> If the repo you ingest is **private**, you must also add its store name to `kb/PRIVATE-STORES.json`
-> before building any publishable bundle — see the private fence section.
-
-## Version: single source of truth
-
-There is **exactly one** hand-edited version number: the `version` field in
-`plugin/.claude-plugin/plugin.json`. Every other surface inherits it.
-
-1. Bump `version` in `plugin/.claude-plugin/plugin.json` (that is the only place you type it).
-2. Run:
-   ```bash
-   node scripts/sync-version.mjs
-   ```
-   This writes the version into `package.json`, `data/manifest.json` (`brainVersion`), and
-   `kb/package.json`. Code paths read it at runtime via `getVersion()` in `scripts/version.mjs` —
-   never hardcode a version string anywhere else.
-3. CI (and you, before a PR) verify no surface has drifted:
-   ```bash
-   node scripts/sync-version.mjs --check   # exits 1 on any drift; also npm run version:check
-   ```
-   `--check` also fails if a code path carries a stray hardcoded `vX.Y.Z-dev` literal instead of
-   calling `getVersion()`.
-
-The README's blue version badge and heading are generated release surfaces; update them only
-through the version/release tooling, never as an isolated hand edit.
-
-## Running the tests
-
-```bash
-npm test                              # plugin QA over real JSON-RPC (plugin/test/run-tests.mjs)
-npm run version:check                 # fail if any surface drifted from plugin.json's version
-bash scripts/gate.sh                  # rebuild concepts + the three pass/fail routing gates
-node scripts/behavioral-l1-l4.mjs     # the 4-level behavioral harness (route/recall/implement/orchestrate)
-```
-
-- `npm test` verifies manifests/structure, that the grounding hook fires on RuvNet prompts (and
-  stays silent otherwise — the always-on status footer is expected, not a leak), the MCP launcher
-  (`initialize` / `tools/list`), and the capability battery. Sections that need the brain skip
-  cleanly if it isn't installed at `$RUVNET_BRAIN_KB` or `~/.cache/ruvnet-brain/kb`.
-- `scripts/gate.sh` is designed to be **able to fail** (SEC-0010 #1): each gate's real exit code is
-  captured via `PIPESTATUS`, so a miss makes the whole script exit non-zero. Reports land in
-  `DESCRIBED-PROOF.md`, `PROOF.md`, and `HELIX-DEMO-NOHELIX.md`.
-
-Set `KB_MODEL_CACHE` before running the grading scripts to avoid a first-run model download.
-
-## How author rebuilds work
-
-Author rebuilds prepare candidate bytes. They do not publish and are not scheduled in a developer
-checkout.
-
-- **Driver:** `scripts/self-update.mjs` compares each in-scope repo's live `git ls-remote HEAD`
-  against the SHA stamped in `data/manifest.json`, then rebuilds only what changed.
-  - Dry-run (prints the rebuild plan, writes nothing): `node scripts/self-update.mjs`
-  - Apply: `node scripts/self-update.mjs --apply` — only from a clean linked worktree outside the
-    primary checkout; rebuilds stale/changed **already-built** repos
-    serially (embedding is CPU-bound), re-stamps, and re-assembles `dist/ruvnet-brain`.
-  - Scope flags: `--tier T0`, `--repo ruflo`. Building **brand-new** repos is a supervised,
-    multi-hour job and is gated behind `--include-new` so an ordinary rebuild cannot silently deep-walk 40+
-    repos on its first run. T3 is deep-walked only when named explicitly.
-- **Publish (the last mile):** `self-update.mjs --publish` is refused. Only the protected release
-  workflow may bind a clean exact SHA to tested artifacts and publish them.
-- **No author scheduler:** `com.ruvnet.brain-nightly` was retired on 2026-08-22 after it wrote
-  generated source into the primary checkout. `scripts/nightly-wrapper.sh` is manual and guarded.
-  The separate optional `com.ruvnet.brain-update` job updates an installed cache and remains
-  supported; it does not build or publish source.
-
-> The primer / L2 / concepts layer and answer-quality grading are **supervised** steps. Re-run them
-> by hand when a repository changes materially.
 
 ## The fail-closed private fence
 
-Some KBs are built from **private** source (the `cognitum-one` org) and must never ship in a public
-bundle. `kb/PRIVATE-STORES.json` is the allow-list-inverse: it names those stores, and
-`scripts/build-bundle.mjs` drops them (and their raw L2 `.md` files) during assembly.
-
-The fence is **fail-closed** (security-critical, SEC-0010 #4). `build-bundle.mjs` **aborts the
-build** if `PRIVATE-STORES.json` is:
-
-- **missing** — unless you explicitly opt out with `ALLOW_NO_PRIVATE_FENCE=1` (the escape hatch a
-  genuine no-private public fork needs, never the silent default);
-- **present but unparseable/corrupt**; or
-- **missing a valid `privateStores` array**.
-
-A fence that degraded to an empty set on error would silently ship every store, including private
-source — so it refuses to build instead. **When you ingest a private repo, add its store name to
-`kb/PRIVATE-STORES.json` in the same change.** Zero-leak is verified in the assembled + zipped
-bundle on every publish.
-
-## Pull requests
-
-- Keep changes surgical. Run `npm run version:check` and `npm test` before opening a PR.
-- **Do not** hand-edit generated version surfaces (README badge line, `package.json`,
-  `data/manifest.json` `brainVersion`, `kb/package.json`) — bump `plugin.json` and run
-  `sync-version.mjs` instead.
-- If you touch a doc, version it per the header convention used across `docs/`.
+`kb/PRIVATE-STORES.json` names stores built from private source; `scripts/build-bundle.mjs` drops
+them and **aborts** if the file is missing (unless `ALLOW_NO_PRIVATE_FENCE=1`), unparseable, or lacks
+a `privateStores` array. When you ingest a private repo, add its store name in the same change.
 
 ## Principles
 
-Every design decision in this project is governed by [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md). Read it before proposing an architecture; a change that contradicts a principle is wrong, and the contradiction is the finding.
+Every design decision is governed by [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md). A change that
+contradicts a principle is wrong, and the contradiction is the finding.

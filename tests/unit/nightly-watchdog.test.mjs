@@ -345,3 +345,17 @@ describe.skipIf(!hasSh || process.platform === 'win32')('job-heartbeat.sh — ki
     expect(verdict.detail).toMatch(/NEVER FINISHED/);
   });
 });
+
+describe('one update owner per machine (2026-09-26 consolidation)', () => {
+  it('treats agentic-kit as the Brain update owner only when kit.json says ruvnetBrain:true', async () => {
+    const { brainUpdateOwnedByAgenticKit } = await import('../../scripts/nightly-watchdog.mjs');
+    const fsm = await import('node:fs'); const osm = await import('node:os'); const pathm = await import('node:path');
+    const home = fsm.mkdtempSync(pathm.join(osm.tmpdir(), 'ak-owner-'));
+    expect(brainUpdateOwnedByAgenticKit(home)).toBe(false);                 // no agentic-kit → Brain scheduler is expected
+    fsm.mkdirSync(pathm.join(home, '.config', 'agentic-kit'), { recursive: true });
+    fsm.writeFileSync(pathm.join(home, '.config', 'agentic-kit', 'kit.json'), JSON.stringify({ ruvnetBrain: false }));
+    expect(brainUpdateOwnedByAgenticKit(home)).toBe(false);                 // agentic-kit present but not managing the Brain
+    fsm.writeFileSync(pathm.join(home, '.config', 'agentic-kit', 'kit.json'), JSON.stringify({ ruvnetBrain: true }));
+    expect(brainUpdateOwnedByAgenticKit(home)).toBe(true);                  // agentic-kit owns updates
+  });
+});

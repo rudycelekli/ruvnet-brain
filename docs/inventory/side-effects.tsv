@@ -1,0 +1,551 @@
+file	kind	target	line	note
+console/app.js	write	localStorage key rbc-theme	162	initTheme() theme-toggle click handler; persists dark/light choice in the browser, wrapped in try/catch for private-mode
+console/app.js	write	localStorage key rvbc-seen	763	renderStack() marks "stack card seen" so it only auto-expands on first visit; runs on every stack render, wrapped in try/catch
+console/app.js	external	POST /api/undo	1590	undoBatchResult(): Undo button shown after a "Fix all" batch apply
+console/app.js	external	POST /api/apply	1604	applyAllVerified(): "Yes, fix all verified items" confirm button
+console/app.js	external	POST /api/apply	1813	doApply() inside buildRecCard(): Apply button on a single recommendation; confirmed first via showConfirm() when rec.touchesMachine is true
+console/app.js	external	POST /api/undo	1852	doUndo() inside buildRecCard(): "Undo this change" button on an applied recommendation
+console/app.js	external	POST /api/save-config or /api/save-advocacy	2798	buildSettingsForm() submit handler; endpoint is '/api/save-config' for the config.json form (instantiated line 2931) or '/api/save-advocacy' for the user-settings form (instantiated line 2937)
+console/app.js	external	POST /api/undo	2817	Settings-form "Undo save" button, rendered only when the save response includes an undoToken
+console/app.js	external	POST /api/save-brain-profile	3156	bpProfileControl() "Apply selection" button; switching to the 'ruvector' profile is gated behind a window.confirm()
+console/app.js	external	POST /api/save-brain-power	3216	bpFlip(): brain on/off switch; turning OFF is gated behind a confirm step (bpAskToTurnOff), turning ON is immediate
+console/app.js	external	POST /api/refresh	3668	doManualRefresh(): triggered by the header refresh button, the freshness pill click, and automatically after any successful apply/undo (via the recheckMachine alias)
+console/app.js	external	clipboard (navigator.clipboard.writeText)	3500	renderUpdateGong() "update available" button copies `npx ruvnet-brain --update` to the OS clipboard; falls back to showing the command as plain text if the clipboard API throws
+console/app.js	external	POST /api/set-lesson	4177	setLessonCall(): fired when a lesson checkbox is toggled in the Lessons card; action is 'restore', 'ratify', or 'demote' depending on the lesson's prior state
+scripts/ci/stranger-scenario.mjs	write	<homeDir> (--home dir)	157	fs.mkdirSync creates the virgin HOME sandbox before every scenario run
+scripts/ci/stranger-scenario.mjs	write	<homeDir>/.claude/plugins/marketplaces/ruvnet-brain/plugin	91	seedPluginSurface(): mkdir + fs.cpSync copies the real plugin/ tree (--plugin-src) into the virgin HOME; invoked unconditionally at line 158
+scripts/ci/stranger-scenario.mjs	write	OS tmpdir stranger-kb-stage-*	75	buildKbFixture(): fs.mkdtempSync creates a scratch staging dir for the fixture KB; runs for every scenario (call site line 164)
+scripts/ci/stranger-scenario.mjs	spawn-repo	scripts/ci/build-fixture-kb.mjs	80	buildKbFixture(): execFileSync runs the fixture-KB builder with --out <stagedRoot>, plus --drop-mcp only for the seeded-broken scenario
+scripts/ci/stranger-scenario.mjs	spawn-repo	scripts/ci/stranger-fixture-stage.mjs (stageLocalBundle, imported function call, not a subprocess)	165	stages the just-built fixture into INSTALLED's local-bundle location; implementation not read (file outside the 12-file scope)
+scripts/ci/stranger-scenario.mjs	spawn-repo	<installed>/bin/install.mjs	128	runInstaller(): spawnSync runs the packed/installed copy of the installer (never this checkout's own bin/install.mjs) under a sanitized PATH and the virgin HOME; called for the initial --local install (line 168, every scenario) and again for --doctor --hooks (line 179, only in the healthy scenario)
+scripts/distill-project.mjs	store	<project>/.swarm/backups (--backup-dir, default)	151	`ruflo memory backup --db --dir` takes a WAL-safe snapshot before any mutation; the whole run aborts if this fails; skipped entirely in --dry-run mode
+scripts/distill-project.mjs	write	~/.cache/ruvnet-brain/distill-receipts.jsonl	97	writeReceipt() fsync-appends a JSON line; called before the mutation (line 168, fail-closed — no receipt means no distill run) and again after it completes (line 192); skipped in --dry-run mode
+scripts/distill-project.mjs	store	<project>/.swarm/memory.db (--db, default)	175	`ruflo memory distill run --db` mutates/distills the project's memory store; not run in --dry-run mode (dry-run instead calls `distill run --dry-run` at line 137, which writes nothing)
+scripts/sync-census.mjs	write	README.md, plugin/skills/ruvnet-brain/SKILL.md, primer/ruvnet-primer.md, explainer/index.html, explainer/llms.txt, explainer/llms-full.txt, plugin/.claude-plugin/plugin.json	143	rewrites each listed surface whose corpus-size claims disagree with data/manifest.json (and the RVF chunk/store ledger when built); a given surface is skipped when its content is unchanged, and all writes are skipped (drift only reported, exit 1) when run with --check
+kb/query-deadline.mjs	none	-	-	purely computational: deadline/timeout utilities and a QueryDeadlineExceeded error class; the only externally-visible actions are the default injectable hooks inside armProcessWatchdog() (process.stderr.write for a log line, process.exit() on watchdog expiry), never invoked unless a caller lets the deadline actually expire
+plugin/scripts/lesson-command-scope.mjs	none	-	-	pure string classification (looksLikeOutsideRepoMutation): tokenizes/parses a shell command string and returns a boolean; no fs, network, or process calls
+scripts/release-publication-handoff.mjs	write	temp files .release-identity.<pid>.<uuid>.tmp and .channels-converged.<pid>.<uuid>.tmp under <evidenceRoot>	53	writePrivateTemp() writes each payload (mode 0600) before linking; called twice from materializePublicationHandoff (lines 87-88)
+scripts/release-publication-handoff.mjs	write	<identityPath> (release-evidence/<name>.json, caller-supplied)	89	fs.linkSync materializes the identity temp file into place; only reached after validatePublicationHandoff() verifies the receipt's signature/schema, and only if the target filename does not already exist (checked in resolvePublicationHandoffPaths)
+scripts/release-publication-handoff.mjs	write	<receiptPath> (release-evidence/<name>.json, caller-supplied)	91	fs.linkSync materializes the channel-receipt temp file into place; same guards as the identity write above
+scripts/public-verification-abandon.mjs	write	<tmpdir>/abandon-failed-artifact-*/failure.zip	55	failureFromArtifact() downloads the GitHub Actions failure artifact via `gh api .../zip` and writes the bytes to a temp file (mkdtemp at line 52); removed in a finally block at line 63
+scripts/public-verification-abandon.mjs	write	directory for --out	88	fs.mkdirSync ensures the parent directory of the CLI --out path exists before the receipt is written
+scripts/public-verification-abandon.mjs	write	--out (CLI, required)	89	fs.writeFileSync ('wx', mode 0600) writes the final signed abandonment-closure receipt; refuses if the file already exists (checked line 72); only reached via the CLI direct-invocation path (lines 93-101) after strict GitHub Actions dispatch-provenance checks (closureProvenance) pass and RUVNET_SIGNING_KEY is present
+plugin/scripts/routing-outcome-capture.mjs	write	~/.claude/metaharness/routing-outcomes.jsonl (or $MODEL_ROUTER_OUTCOMES)	71	appendObservation(): mkdir's the parent dir then fs.appendFileSync's one JSON line; runs from the PostToolUse hook's main() (line 84) only when the event is a Task/Agent call with a recognized terminal status; fails silently (fail-open) on any write error
+scripts/release-evidence-aggregate.mjs	write	--out (CLI, default release-evidence/aggregate-envelope.json)	53	fs.writeFileSync ('wx', mode 0600) writes the aggregated evidence envelope; only reached via the CLI direct-invocation path (isCli check) after aggregateEvidence() confirms every required leaf is present and marked PASS
+scripts/git-clone-refresh.mjs	write	submodule symlinks under <repoDir> (detach)	34	withSubmoduleSymlinksDetached(): fs.unlinkSync removes each symlinked submodule path before running the caller-supplied operation(); only runs when the repo has .gitmodules with symlinked submodule paths
+scripts/git-clone-refresh.mjs	write	submodule symlinks under <repoDir> (restore)	49	same function's finally block: fs.rmdirSync/fs.mkdirSync/fs.symlinkSync recreate each detached symlink after operation() returns or throws; operation() itself (called line 38) is a caller-supplied callback whose behavior is not resolvable from this file — presumably the actual git clone/fetch refresh this module is named for
+plugin/scripts/gate-receipt.sh	write	$HOME/.cache/ruvnet-brain/gate-blocks.jsonl	27	appends one JSON line (gate, subject, reason, cwd, UTC timestamp) recording a gate's block; mkdir -p ensures the parent dir first (line 22); called by a blocking gate right before it exits non-zero; all failures are swallowed (`|| exit 0`, `|| true`) so this script can never itself break a gate
+scripts/wired-check.mjs	none	-	-	pure static-analysis/audit tool; only reads files (fs.readFileSync/readdirSync) and computes; no writes, no spawn/exec calls anywhere in file
+plugin/scripts/grounding-substance.mjs	write	<cacheDir>/grounding-overrides.jsonl	479	writeOverrideReceipt() appends an override receipt; only when a valid RUVNET_GROUNDING_OVERRIDE token (>=12 chars) accompanies a blocked Write/Edit/MultiEdit
+plugin/scripts/grounding-substance.mjs	spawn-repo	plugin/scripts/gate-receipt.sh	487	gateReceipt() shells out to gate-receipt.sh to log a gate decision; fires on both the override-accepted and the refusal path
+plugin/scripts/lesson-store.mjs	write	~/.config/ruvnet-brain/lessons.json (or $RUVNET_LESSON_STORE)	384	saveLessons() atomic write (tmp file + rename) of the full lesson store; lock-protected
+plugin/scripts/lesson-store.mjs	write	<CONFIG_ROOT>/lesson-backups/lessons-<ts>.json	375	saveLessons() copies the existing store to a timestamped backup before every write
+plugin/scripts/lesson-store.mjs	write	<CONFIG_ROOT>/lesson-backups/* (rotation)	377	saveLessons() deletes old backups beyond the most recent 20
+kb/update-storage-transaction.mjs	write	<liveDir>.update-transactions/<transactionId>/NNN-STATE.json	211	writeReceiptAtomic() writes a transaction-phase receipt at every state transition, called from recorder() inside runStorageTransaction()
+kb/update-storage-transaction.mjs	write	<liveDir>.next-<transactionId>	368	runStorageTransaction() copies sourceDir into the candidate sibling dir (fs.cpSync) before validation
+kb/update-storage-transaction.mjs	write	<liveDir> -> <liveDir>.rollback-<transactionId>	393	runStorageTransaction() renames the live tree aside before activating the candidate
+kb/update-storage-transaction.mjs	write	<liveDir>.next-<transactionId> -> <liveDir>	398	runStorageTransaction() renames the validated candidate into the live position (activation)
+kb/update-storage-transaction.mjs	write	<liveDir>.rollback-<transactionId>	437	runStorageTransaction() removes the rollback copy after a committed transaction (default removeRollback = fs.rmSync)
+kb/update-storage-transaction.mjs	write	<liveDir>.rollback-<transactionId> -> <liveDir>	283	recoverIncompleteStorageTransactions() restores an interrupted OLD_RENAME_STARTED transaction; runs automatically at the start of every runStorageTransaction() call
+scripts/issue-watch.mjs	external	ntfy.sh/<topic> (HTTPS POST push)	96	pushNtfy() alerts on a new-issue sighting or an SLA breach; skipped when --dry-run or no ntfy topic configured
+scripts/issue-watch.mjs	external	GitHub issue comment (gh issue comment)	176	posts the one-time "automated acknowledgment" comment on first sighting of a new issue; skipped on --dry-run
+scripts/issue-watch.mjs	write	~/.claude/ruvnet-brain/issue-watch-state.json (or $ISSUE_WATCH_STATE)	113	saveState() persists per-issue alert/ack dedupe state; skipped on --dry-run
+scripts/issue-watch.mjs	write	~/.cache/ruvnet-brain/open-issues.json	366	main() writes the SessionStart-hook status snapshot (issues, PRs, security alerts); skipped on --dry-run
+scripts/self-update.mjs	write	clones/<repo>	251	git clone of an in-scope upstream repo into the local clone cache; only under --apply, for repos in the rebuild/new todo list
+scripts/self-update.mjs	write	clones/<repo>	258	git fetch+reset of an already-cloned repo to refresh it; only under --apply
+scripts/self-update.mjs	spawn-repo	kb/forge-refresh.mjs	276	runStep() rebuilds one repo's KB store; only under --apply, for todo repos
+scripts/self-update.mjs	spawn-repo	scripts/build-symbols.mjs	278	runStep() rebuilds the symbol index for the refreshed store; only under --apply
+scripts/self-update.mjs	spawn-repo	scripts/corpus-qa.mjs	286	runStep() runs the structural/self-retrieval QA gate on the refreshed store; only under --apply
+scripts/self-update.mjs	spawn-repo	scripts/brain-stamp.mjs	313	re-stamps the bundle after all todo repos build successfully; only under --apply and only if zero build failures
+scripts/self-update.mjs	spawn-repo	scripts/build-bundle.mjs	316	re-assembles the shipped dist/ruvnet-brain bundle; only under --apply, after stamping
+scripts/self-update.mjs	spawn-repo	scripts/notify.sh	300	NOTIFY() alerts (e.g. ntfy) when any repo build fails this run; only under --apply
+plugin/scripts/project-progression-session-start.mjs	write	<dirname of resolution.canonicalAgentDbPath>	229	creates the canonical project AgentDB directory; only when the store does not yet exist (first adoption of a project)
+plugin/scripts/project-progression-session-start.mjs	store	<resolution.canonicalAgentDbPath> (project-progression-control ns)	129	initializeCanonicalStore() runs `ruflo memory store` (via store.run) to write the bootstrap key; only when initializing a brand-new canonical store
+scripts/model-router-engine.mjs	write	~/.claude/metaharness/routing-decisions.jsonl (or $MODEL_ROUTER_DECISIONS)	250	appends every routing decision to the durable decision log
+kb/corpus-freshness.mjs	external	registry.npmjs.org/<pkg>/latest (HTTPS GET)	244	probeLiveVersions() bounded (1s), opt-out live-version lookup for the 7 managed executables; disabled under hooks/CI/plan-mode/offline env flags
+scripts/falsify.mjs	spawn-repo	scripts/no-silent-substitution.mjs	48	CHECKS[am-i-impersonating-ruv] shells out to verify no local code impersonates a rUv tool
+scripts/falsify.mjs	spawn-repo	scripts/nightly-watchdog.mjs	57	CHECKS[did-the-jobs-actually-run] shells out --json to verify scheduled jobs produced fresh receipts
+scripts/falsify.mjs	spawn-repo	scripts/sync-version.mjs	89	CHECKS[does-the-repo-ship-what-it-claims] shells out --check to verify version parity across surfaces
+scripts/gist-git-transport.mjs	write	<tempRoot>/ruvnet-gist-git-* (scratch dir)	203	fetchGistGitSnapshot() creates a temp staging dir; removed in a finally block after capture
+scripts/gist-git-transport.mjs	external	gist.github.com/<gistId>.git (bare git clone)	209	fetchGistGitSnapshot() clones the public gist as a bare repo to inspect its immutable Git snapshot (read-only)
+scripts/behavioral-l1-l4.mjs	spawn-repo	plugin/scripts/session-start.sh	153	runL4() executes the real SessionStart hook once per harness run to capture its injected text
+scripts/behavioral-l1-l4.mjs	spawn-repo	plugin/scripts/ground-ruvnet.sh	157	runL4() executes the real UserPromptSubmit hook per L4 scenario prompt
+kb/resolve-deps.mjs	none	-	-	pure module-resolution + a fetch-timeout guard wrapping global fetch for transformers.js's own optional model download; this file makes no network/file-write calls itself
+scripts/run-operational-benchmark.mjs	spawn-repo	<kb>/forge-ask-all.mjs	55	runOperationalBenchmark() invokes the real customer-path reader per fixture (kb = $RUVNET_BRAIN_KB or ~/.cache/ruvnet-brain/kb)
+scripts/run-operational-benchmark.mjs	write	evals/operational-runs/<timestamp>.json	144	main() writes the full benchmark receipt JSON to disk
+scripts/qualified-candidate-check.mjs	write	<os.tmpdir()>/qualified-candidate-* (scratch dir/zip)	63	downloadQualificationReceipt() stages the downloaded artifact zip and extracts it; removed in a finally block
+scripts/dream-issue-gate.mjs	none	-	-	pure disposition function over stdin JSON; explicitly documented as unable to create or mutate GitHub data (CLI only writes to stdout)
+scripts/adr-072-completion.mjs	external	npm registry (npm view ruvnet-brain@latest version)	36	evaluateCompletion()'s version check reads the live published version from npm
+plugin/scripts/session-start-signals.mjs	spawn-repo	scripts/signal-watch.mjs	34	dispatches the CI-signal poller as a detached background process; only when the poller exists and its status cache is >10min stale
+plugin/scripts/session-start-signals.mjs	write	<stateDir>/external-signals/surfaced.json	72	persists which signal transitions (red/green/unverifiable) have already been surfaced; only when the surfaced set changed
+scripts/ci/learning-replay-recorder.mjs	spawn-repo	plugin/scripts/hook-input.mjs	39	parses the PreToolUse payload via the shared hook-envelope translator
+scripts/ci/learning-replay-recorder.mjs	write	<attempts.jsonl> (argv[2])	46	appends the recorded (never-executed) command attempt; fixture-only hook, never installed in a user's settings.json
+scripts/ci/learning-replay-recorder.mjs	write	<sequenceOut> (argv[3])	52	appends the same attempt to a second combined sequence log; only when argv[3] is given
+scripts/count-chunks.mjs	write	<claims-verify.mjs:applyFix public surfaces>	32	invokes applyFix({write:!CHECK}) which restamps the fresh chunk count onto public surfaces (e.g. SOURCE.json); actual write logic lives in scripts/claims-verify.mjs (out of scope); skipped under --check (report-only)
+plugin/scripts/development-maintenance.mjs	none	-	-	pure read of git worktree metadata + local maintenance-suspend state file; header states explicitly "no Git subprocess, network, hook bodies, or writes on the read path"
+kb/forge-ask.mjs	external	<embedding-model host, e.g. https://huggingface.co>	151	HEAD preflight connectivity probe before a remote model fetch; only fires when the model is not already cached locally (T.env.allowRemoteModels true)
+kb/forge-ask.mjs	write	<KB_MODEL_CACHE>/<model-name> (ONNX weights, path resolved via resolve-deps.mjs/model-requirements.mjs, not in this file)	168	T.pipeline('feature-extraction', model, {revision}) downloads/caches the embedder's ONNX weights; only when the model is not already cached locally (remote download branch)
+kb/forge-ask.mjs	write	<KB_MODEL_CACHE>/<model-name> (delete)	191	fs.rmSync(modelDir) self-heals a corrupted local model cache (issue #29) before one re-fetch attempt; only when a local (non-remote) load failed and modelDir exists
+kb/forge-mcp-all.mjs	write	~/.cache/ruvnet-brain/token-ledger.jsonl (or $XDG_CACHE_HOME/ruvnet-brain/token-ledger.jsonl)	59	meterLog() appends one line per search_ruvnet response; disabled by RUVNET_BRAIN_METER=0; all errors swallowed
+kb/forge-mcp-all.mjs	write	~/.cache/ruvnet-brain/install-state.json (or $XDG_CACHE_HOME/ruvnet-brain/install-state.json)	88	markGroundingProven() atomic tmp-write+rename clears the install-time "grounding: unproven" flag; only fires on a real grounded answer (card hit or results.length>0), no-op if already proven
+kb/forge-mcp-all.mjs	write	<KB_DIR>/evidence-failures.jsonl	228	noteEvidenceFailure() appends a diagnostic line; only on an evidence-writer failure, capped at 256KB, errors swallowed
+kb/forge-mcp-all.mjs	external	<brain-alarm state: health.json + phone push, delegated to brain-alarm.mjs not in file list>	428	alarm.reportBrainDown() rings an outage alert; only when ALL queried repos failed to search in this call
+kb/forge-mcp-all.mjs	external	<brain-alarm state: health.json + phone push, delegated to brain-alarm.mjs not in file list>	440	alarm.reportBrainUp() sends a recovery signal; only when zero repos failed in this call
+kb/forge-mcp-all.mjs	external	<opt-in usage ping, delegated to telemetry-ping.mjs not in file list>	251	telemetry.recordEvent('session', ...) on server startup; only if the user opted in (consent file present per comment), batched to <=1/day
+kb/forge-mcp-all.mjs	write	<local grounded-once stamp file, delegated to telemetry-ping.mjs not in file list>	520	telemetry.stampGroundedOnce() writes a local-only marker (per comment "never leaves the machine"); on the real-answer success path
+kb/forge-mcp-all.mjs	external	<opt-in usage ping, delegated to telemetry-ping.mjs not in file list>	521	telemetry.recordEvent('search', ...) on a successful search; same opt-in/batching gate as line 251
+kb/forge-mcp-all.mjs	write	<forge-evidence ledger, ADR-055, delegated to forge-evidence.mjs not in file list>	386	evidenceWriter.recordAnswer() mints a receipt for a card-lane hit; failures routed to noteEvidenceFailure('card-lane', e)
+kb/forge-mcp-all.mjs	write	<forge-evidence ledger, ADR-055, delegated to forge-evidence.mjs not in file list>	537	evidenceWriter.recordAnswer() mints a receipt for the full-search success path; only when results.length>0; failures routed to noteEvidenceFailure('heavy', e)
+scripts/learning-replay-proof.mjs	write	data/learning-replay-transcripts/<sourceSha>/<sha256>.json	98	writeProof() writes one immutable transcript envelope per treated/control arm; skipped if the content-addressed file already exists
+scripts/learning-replay-proof.mjs	write	<dirs.base>/* (caller-supplied fixture dir, delete)	373	pruneArchive() removes every entry under dirs.base except 'transcripts' and 'run-manifest.json'
+scripts/learning-replay-proof.mjs	write	<path.dirname(dirs.base)>/<old-run-dir> (delete)	384	pruneArchive() deletes old run directories beyond keepRuns (default 14), excluding preservePaths
+scripts/learning-replay-proof.mjs	write	<caller-supplied result artifact file, e.g. RESULT_FILE from learning-replay-contract.mjs>	495	writeArtifact() writes the learning-replay verdict artifact; refuses to overwrite a real PASS/FAIL with an unmeasurable UNKNOWN (guard at lines 481-493)
+plugin/scripts/project-progression-store.mjs	store	AgentDB memory.db, namespace "project-progression" (resolution.canonicalAgentDbPath, i.e. project's .swarm/memory.db convention)	184	appendExact() runs `ruflo memory store --key <eventKey> --namespace project-progression --no-upsert` via spawnSync; the sole writer path for progression snapshots
+plugin/scripts/project-progression-store.mjs	write	<ProgressionOutbox durable log, delegated to project-progression-outbox.mjs not in file list>	237	capture() fsyncs the snapshot to the outbox log before the store call (crash-safety), via this.outbox.appendSnapshot()
+plugin/scripts/project-progression-store.mjs	write	<ProgressionOutbox durable log, delegated to project-progression-outbox.mjs not in file list>	240	capture()/replay() mark outbox entries committed after a verified store+readback, via this.outbox.markCommitted()
+scripts/public-verification-lane.mjs	write	<tmpdir>/ruvnet-public-<os>-XXXXXX (temp scratch dir)	279	fs.mkdtempSync() creates a scratch dir to build the intermediate publication receipt
+scripts/public-verification-lane.mjs	write	<outPath> (CLI --out, required)	305	fs.writeFileSync writes the public-verification lane receipt; refuses to overwrite an existing file (checked at line 278)
+scripts/public-verification-lane.mjs	write	<outPath> (CLI --out, required)	319	catch-block failure receipt written to the same --out path; only if the success path never wrote it (fs.existsSync guard)
+scripts/public-verification-lane.mjs	write	<tmpdir>/ruvnet-public-<os>-XXXXXX (delete)	325	finally-block cleanup removes the temp scratch dir
+scripts/release-vector.mjs	spawn-repo	tests/regression/interface-gate-corpus.test.mjs (via npx vitest)	113	INTERFACE-CORPUS invariant runs the incident regression corpus
+scripts/release-vector.mjs	spawn-repo	scripts/doc-currency.mjs	121	INTERFACE-CORPUS invariant runs `node scripts/doc-currency.mjs --check --changed <base>`
+scripts/release-vector.mjs	spawn-repo	scripts/qe/card-lane-gate.mjs	134	LATENCY-DECISION-LANE invariant runs `node scripts/qe/card-lane-gate.mjs`
+scripts/release-vector.mjs	spawn-repo	tests/mesh/ (via npx vitest)	146	COEXIST-BYTE-EQUAL invariant runs the mesh coexistence suite
+scripts/release-vector.mjs	spawn-repo	tests/unit/session-start-core-parity.test.mjs, tests/unit/session-start-gate.test.mjs (via npx vitest)	215	CONTINUITY-PLANE-FIRES invariant runs the SessionStart lifecycle proof suites
+scripts/release-vector.mjs	spawn-repo	tests/experience/report.mjs	240	SCENARIOS-CURRENT invariant runs `node tests/experience/report.mjs`
+scripts/release-vector.mjs	spawn-repo	tests/qe/gpt56/live-brain-search.test.mjs (via npx vitest, env REQUIRE_BRAIN=1)	254	GUARANTEE-RUNS invariant runs a live test that itself queries the real search_ruvnet MCP
+scripts/fix-workstream.mjs	write	<--worktree path> (new git worktree + branch)	176	startFixWorkstream() runs `git worktree add -b <branch> <writer> <base>`, creating a new checkout on disk; only for the 'start' subcommand, only if the path/branch do not already exist
+scripts/fix-workstream.mjs	write	<--out path, required for the 'handoff' subcommand>	139	emit() writes the fix-handoff receipt with `wx` (refuses to overwrite); only invoked for the 'handoff' operation
+scripts/single-source-check.mjs	spawn-repo	scripts/wired-check.mjs	45	check A1 runs `node scripts/wired-check.mjs --check` to source the wired/unwired audit
+scripts/single-source-check.mjs	spawn-repo	scripts/nightly-watchdog.mjs	209	check F2 runs `node scripts/nightly-watchdog.mjs` to prove scheduled jobs ran
+scripts/reconcile-project.mjs	write	<project>/.claude/settings.json(.local.json).bak-reconcile-<STAMP>	169	reconcileSettings() backs up settings before rewriting; only when touched && --apply
+scripts/reconcile-project.mjs	write	<project>/.claude/settings.json or settings.local.json	170	reconcileSettings() rewrites hooks/statusLine/permissions to canonical global-binary form; only when touched && --apply (dry-run by default)
+scripts/reconcile-project.mjs	write	<project>/.mcp.json.bak-reconcile-<STAMP>	204	reconcileMcp() backs up .mcp.json before rewriting; only when touched && --apply
+scripts/reconcile-project.mjs	write	<project>/.mcp.json	205	reconcileMcp() rewrites npx-based rUv MCP server entries to the global binary or deletes exact duplicates; only when touched && --apply (dry-run by default)
+scripts/remedy-registry.mjs	none	-	-	pure data/logic module — per its own header, "no I/O, no spawn, no fs"; returns {script,args} plan descriptions that onboarding-console.mjs (not in file list) is solely responsible for executing
+scripts/corpus-next-seed.mjs	write	<tmpdir>/corpus-next-seed-XXXXXX/corpus-receipt.json	96	judgeRelease() creates a scratch dir (mkdtempSync, line 94) and `gh release download` writes the candidate's receipt asset into it, for each corpus-shaped release tag being judged
+scripts/corpus-next-seed.mjs	write	<tmpdir>/corpus-next-seed-XXXXXX (delete)	137	judgeRelease()'s finally block removes the scratch dir
+scripts/corpus-next-seed.mjs	write	<--out path> (optional)	217	main() writes the resolved seed descriptor; only when --out is supplied (otherwise only printed to stdout)
+scripts/release-authority.mjs	none	-	-	pure read-only source-code auditor (fs.readFileSync/readdirSync only); scans for unauthorized npm-publish/gh-release/dist-tag patterns and Ed25519 trust-root drift, makes no writes and spawns nothing
+scripts/check-legibility.mjs	none	-	-	read-only Playwright check against the --url argument; launches a local headless Chromium and issues GET requests to render/measure the page; no filesystem writes, no external mutations, exits 0/3 based on pixel measurements only
+plugin/scripts/adr-currency-gate.mjs	none	-	-	read-only PreToolUse-style gate; reads stdin JSON + scripts/doc-currency.mjs governance data (fs reads only, dynamic import is in-process, not a spawn) and exits 0 (allow) or 2 (block) with a stderr message; makes no writes
+scripts/org-repo-count.mjs	write	data/org-repo-count.json (or $RUVNET_ORG_COUNT_RECORD)	87	orgRepoCount() records the live GitHub repo count; only when a live `gh api` read succeeds AND persist=true (CLI default is persist=false; only true with the explicit --record flag)
+scripts/stabilization-receipt.mjs	write	<--out path, required>	109	main() writes the stabilization-candidate receipt with `wx` (refuses to overwrite an existing file, checked at line 101)
+tri-smart-skill/tri-smart/scripts/setup.mjs	spawn-repo	tri-smart-skill/tri-smart/scripts/verify-access.mjs	50	readVerification() runs the verifier script via spawnSync on every access-status check (called repeatedly through the flow)
+tri-smart-skill/tri-smart/scripts/setup.mjs	external	<vendor OAuth login flow: claude auth login / codex login / grok login --oauth>	80	run([p.cli, ...p.login], true) launches the provider's native OAuth login CLI; only when the user answers y/yes to the "Continue?" prompt for a not-yet-verified provider
+scripts/dual-host-suggest.mjs	none	-	-	pure recommendation logic (hardProblem()/probeSubscriptionHosts() are imported, not defined here); this file's only fs use is a realpathSync entrypoint guard (read-only), output goes to stdout/stderr only
+plugin/scripts/session-start-fsutil.mjs	write	<file> (caller-supplied argument, no default)	28	write() helper (fs.mkdirSync+fs.writeFileSync); a fail-silent utility exported for other SessionStart stage modules to call — no self-invocation in this file
+plugin/scripts/session-start-fsutil.mjs	spawn-repo	<file> (caller-supplied node script path; concrete known caller is plugin/scripts/detach.mjs via dispatchDetached() at line 59)	43	runNode() helper (spawnSync process.execPath [file,...args]); fail-silent utility, no self-invocation in this file
+scripts/gen-console-images.mjs	write	console/assets/ (directory)	10	fs.mkdirSync(OUT) creates the output directory unconditionally at script start
+scripts/gen-console-images.mjs	external	https://api.openai.com/v1/images/generations	33	gen() POSTs an image-generation request (gpt-image-1, falling back to dall-e-3) to the OpenAI API for each image in IMAGES not filtered out by CLI args
+scripts/gen-console-images.mjs	write	console/assets/<slug>.png	51	fs.writeFileSync writes the generated PNG; only when a generation call (gpt-image-1 or its dall-e-3 fallback) succeeded
+scripts/trismart.mjs	spawn-repo	tri-smart-skill/tri-smart/scripts/review.mjs	37	runs the portable TriSmart reviewer via spawnSync when mode is 'tri' or 'auto' and not --dry-run
+scripts/trismart.mjs	spawn-repo	scripts/dual-host-deliberation.mjs	40	runs the native Dual reviewer via spawnSync when mode is 'dual' and not --dry-run
+plugin/scripts/capability-registry.mjs	none	-	-	entirely read-only capability observation; no fs writes and no real command execution (only path-existence probes via rufloBin()); file's own header states "Everything here is READ-ONLY"
+plugin/scripts/continuation-gate.mjs	write	~/.config/ruvnet-brain/work-ledgers/<projectId>.json	176	save(): writes the per-project work ledger; triggered by --commit-to (211), --done (224), or --clear (229) CLI flags
+plugin/scripts/continuation-gate.mjs	write	<ledger-path>.cooldown lock file	576	claimCooldown(): atomically creates (and, if stale, first deletes at 574) a Stop-hook cooldown lock; only reached when forceable continuation work exists and every loop-safety guard (stdin==stdin-source, !stop_hook_active, has session_id, not cancelled) passes
+scripts/independent-review-receipt.mjs	write	<file given via --out>	451	writeReceipt(): writes the signed independent-review receipt JSON (wx, mode 0600); only via the `produce` CLI command, requires RUVNET_REVIEW_SIGNING_KEY
+scripts/release-transaction-provider.mjs	publish	GitHub release draft (POST repos/<repo>/releases)	270	createDraft(): creates a draft GitHub release anchored to the candidate tag/SHA
+scripts/release-transaction-provider.mjs	publish	GitHub release asset: transaction receipt JSON	346	appendReceipt(): `gh release upload` of a receipt asset to the anchor release
+scripts/release-transaction-provider.mjs	publish	GitHub release assets: public-verification-aggregate.json/.sig	372	materializePublicVerificationAggregate(): `gh release upload` of the aggregate + its signature
+scripts/release-transaction-provider.mjs	publish	GitHub release assets: bundle zip, .sig, .sha256, npm package	408	uploadAssets(): `gh release upload` of each staged asset not already present with matching bytes
+scripts/release-transaction-provider.mjs	publish	npm dist-tag candidate-v<version>	420	stageNpm(): adds the candidate dist-tag when an identical-integrity version already exists on npm
+scripts/release-transaction-provider.mjs	publish	npm publish (candidate-v<version> tag)	423	stageNpm(): `npm publish` of the packed tarball under a candidate dist-tag when not already published
+scripts/release-transaction-provider.mjs	publish	GitHub release PATCH (draft=false, make_latest=false)	432	publishDraftNonLatest(): publishes the release without taking the `latest` pointer
+scripts/release-transaction-provider.mjs	publish	npm dist-tag latest	449	promoteNpm(): moves npm's `latest` tag to the new version after verifying the expected prior version
+scripts/release-transaction-provider.mjs	publish	GitHub release PATCH (make_latest=true)	468	makeGithubLatest(): promotes the release to `releases/latest`
+scripts/release-transaction-provider.mjs	publish	npm dist-tag latest (rollback)	476	restoreNpmLatest(): compensating action restoring the prior version as npm `latest` on failure
+scripts/oracle/source-units.mjs	write	<file given via --out>	371	main(): writes the deterministic source-unit inventory JSON only when `--out` is passed; otherwise prints to stdout
+plugin/scripts/runtime-preferences.mjs	write	<cwd>/.swarm/ruvnet-brain-settings.json	268	seedProjectDefaults(): writes project-inherited defaults; only via `--seed-project`, only when newProjectDefaults is enabled, cwd looks like a project, and the file does not already exist
+plugin/scripts/runtime-preferences.mjs	write	~/.config/ruvnet-brain/secrets.enc.json (+ timestamped .bak backup)	230	saveOpenRouterCredential(): writes the SOPS+age-encrypted OpenRouter key after a successful `sops encrypt`; requires sops and age-keygen present plus a resolvable age recipient; backs up any pre-existing file first (line 226)
+scripts/published-surface-probe.mjs	none	-	-	read-only probe: fetch()/HEAD against the npm registry and GitHub Releases API, plus executing the published package via `npx -y ruvnet-brain@latest --help` inside a scratch HOME dir that is removed immediately after (line 165); no persistent writes or mutations
+plugin/scripts/degradation-watch.mjs	store	scratch SQLite probe DB (os.tmpdir()/ruvnet-durability-probe-<pid>.db) via `ruflo memory store`/`retrieve`	107	proveMemoryDurable(): round-trip write+read against ruflo's managed-memory driver; runs when the CLI entrypoint detects a dependent command (record-lesson/ship pattern) on stdin; the scratch DB and its WAL/SHM siblings are deleted immediately after (lines 136-138)
+scripts/sync-version.mjs	write	plugin/.codex-plugin/plugin.json	106	version-sync target loop; only in write mode (no --check flag) and only when the file's current version differs from plugin.json's version
+scripts/sync-version.mjs	write	package.json	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	package-lock.json	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	data/manifest.json	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	kb/package.json	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	primer/ruvnet-primer.md	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	explainer/index.html	106	same target-loop mechanism as above (targets array)
+scripts/sync-version.mjs	write	kb/RVF-GENERATIONS.json	125	updates brainVersion/releaseTag fields when the file exists and has drifted; --check mode only reports drift (no write)
+scripts/sync-version.mjs	write	README.md	166	updates the version badge (alt text + shields.io URL token) when drifted; --check mode only reports drift (no write)
+scripts/qe/session-start-gate.mjs	write	temp HOME dir tree (os.tmpdir()/ssgate-home-*, incl. .cache/ruvnet-brain, .config/ruvnet-brain)	107	measureFirings(): creates an isolated scratch HOME for hook measurement; no cleanup/rmSync of this directory observed in this file
+scripts/qe/session-start-gate.mjs	spawn-repo	installed/checkout SessionStart hook command (resolved from the plugin hooks registry, e.g. hook-shim.mjs)	126	measureFirings(): fires the real registered SessionStart hook via imported fireHook(), 1 cold + n (default 30) steady-state times, sequentially, for gate measurement
+scripts/brain-latency-50.mjs	spawn-repo	plugin/mcp/server.mjs	89	benchmark(): spawns the MCP server as a child process over stdio JSON-RPC to run the 50-question latency benchmark
+scripts/qe/agentic-qe-4.3.mjs	spawn-repo	scripts/qe/agentic-qe-4.3.mjs (self, via `node --check`)	118	preflight lane step 1 (declared line 28); runs when `--lane preflight` is selected
+scripts/qe/agentic-qe-4.3.mjs	spawn-repo	<npm script "version:check"> (likely wraps scripts/sync-version.mjs --check)	118	preflight lane step 2 (declared line 29); runs when `--lane preflight` is selected
+scripts/qe/agentic-qe-4.3.mjs	spawn-repo	bin/install.mjs (dynamic import probe)	118	windows-unit lane's windowsInstallImportProbe (declared lines 16-20, wired at line 73); runs when `--lane windows-unit`
+scripts/qe/agentic-qe-4.3.mjs	spawn-repo	vitest test files under tests/unit, tests/integration, tests/qe/** (per-lane lists)	118	runStep(): spawns node_modules/vitest/vitest.mjs for whichever `--lane` (preflight/early-public/check/integration/release/resources/windows-unit) is passed
+scripts/qe/agentic-qe-4.3.mjs	write	.qe/receipts/<lane>.json (dir overridable via QE_RECEIPT_DIR env)	193	main(): writes the lane's aggregate QE receipt after the run completes (pass or fail)
+scripts/qe/agentic-qe-4.3.mjs	write	<scratch runDir>/vitest-<index>.json	116	runStep(): each vitest step writes its own JSON report into a per-run scratch directory that is removed afterward (line 194)
+plugin/scripts/learn-flush.mjs	store	ruflo learning store (`ruflo hooks post-command`/`post-edit`; ~/.claude-flow or project-scoped per learningScope)	142	feeds up to 8 distinct session actions into ruflo's learner on SessionEnd; best-effort, bounded to an 18s deadline
+plugin/scripts/learn-flush.mjs	write	<queueRoot>/session-<sid>.jsonl learning queue	186	writes back any actions not fed within the deadline/cap; deletes the file entirely once empty (line 189)
+scripts/stamp-sweep.mjs	write	authored .md files across the repo (git-tracked, non-generated)	121	main(): inserts a git-derived currency stamp into each qualifying file; ONLY with `--apply` (dry-run by default; also skips dirty/no-history/unrecognised-prologue files)
+plugin/scripts/spend-guard.mjs	none	-	-	pure policy check on stdin's tool_input.command + env; only ever writes to stderr and sets an exit code (2 to refuse), never touches a file, network, or subprocess; fails open on any error
+bin/nightly-refresh.mjs	machine	npx -y <packageTarget.spec> --update --no-nightly-prompt (typically `ruvnet-brain@latest`, or a sealed local candidate tarball)	98	the immutable nightly-scheduler target: after validating its registration binds this exact runner/Node/package digest, installs/executes the update via npx (or a resolved npm entry point on Windows, lines 70-93)
+scripts/calibrate-router.mjs	external	`claude -p <prompt> --model <alias>` CLI invocation (calls the Claude API via the local subscription)	55	runOnce(): runs each of 5 deterministic tasks against haiku/sonnet/opus (up to 15 calls); executes unconditionally as top-level script code the moment this file is run (no CLI guard/entrypoint check)
+scripts/calibrate-router.mjs	store	router calibration labels via recordOutcome() into the metaharness router's learning store (metaharness-router.mjs, not in this file)	73	records one contrastive PASS/FAIL score row per task per model
+scripts/calibrate-router.mjs	write	~/.claude/metaharness/routing-receipts.jsonl (or $METAHARNESS_RECEIPTS)	83	appends one calibration receipt per non-baseline model per task, with measured durations and estimated cost/savings
+scripts/nightly-package-observation.mjs	none	-	-	pure read/hash computation over an existing npm package tree and the npx cache layout; no writes, spawns, or network calls anywhere in the file
+scripts/public-verification-finalizer.mjs	write	<file given via --out>	42	finalizePublicVerification(): writes the finalized signed public-verification receipt (wx, mode 0600, refuses to overwrite); calls finalizeReleaseTransaction() with the live GitHub/npm release adapter (see release-transaction-provider.mjs) for any transitive publish reads/writes
+tri-smart-skill/install.mjs	write	<project>/.claude/skills/tri-smart, .agents/skills/tri-smart, and/or .grok/skills/tri-smart (per --host)	45	copies the tri-smart skill folder into the selected host skill dir(s); skipped if already installed without `--force`, or entirely skipped with `--dry-run`
+tri-smart-skill/install.mjs	spawn-repo	tri-smart-skill/tri-smart/scripts/setup.mjs	49	launches the guided OAuth setup walkthrough after install; skipped with `--dry-run` or `--no-setup`
+scripts/handoff-asset.mjs	external	scp file copy to a remote host (`<host>:<remoteDir>/<filename>`; default m4=stuartkerr@100.95.179.114 or air=macbook-air, or explicit --host)	26	copies a generated asset from this (tunneled) host to a client machine's Downloads folder; requires --asset=
+scripts/handoff-asset.mjs	external	ssh remote `shasum -a 256` checksum verification of the copied file	28	verifies the remote copy's SHA-256 matches the local file before reporting success
+scripts/npm-invocation.mjs	none	-	-	pure resolution logic for locating the installed npm CLI entry point (npmInvocation()); only fs reads (realpathSync/readFileSync/statSync); never executes or writes anything itself
+scripts/oracle/retrieval-accuracy.mjs	write	temp extraction dir (os.tmpdir()/retrieval-accuracy-*)	411	mkdtemp + extractZip stages the final archive for measurement; runs on every runRetrievalAccuracy() call
+scripts/oracle/retrieval-accuracy.mjs	spawn-repo	kb/forge-ask-all.mjs (searchAll)	361	dynamic import used as the default query path unless a test injects a `search` override
+scripts/oracle/retrieval-accuracy.mjs	write	<bundle>.accuracy.json (or --out)	590	writes the detached accuracy report JSON; always runs, even when state is FAIL/bounded
+scripts/oracle/retrieval-accuracy.mjs	write	temp extraction dir	593	removes its own temp extraction dir in a finally block (cleanup)
+plugin/scripts/user-settings.mjs	write	~/.config/ruvnet-brain/settings.json	584	writeAtomic() persists settings; only when saveSettings() is invoked by a caller (e.g. console), not automatic
+plugin/scripts/user-settings.mjs	write	<settings.json>.bak-<timestamp>	578	backs up prior settings before overwrite, part of saveSettings()
+plugin/scripts/user-settings.mjs	write	<settings.json>.lock	406	exclusive lock file for read-modify-write mutual exclusion; removed at line 440
+plugin/scripts/user-settings.mjs	write	settings.json (restore or remove)	640	revertSettings() restores a backup atomically or removes the file (line 618) if none existed before
+plugin/scripts/hook-input.mjs	none	-	-	pure stdin JSON parser / shell-command classifier; writes only to stdout, no fs/network effects
+scripts/upgrade-notice.mjs	write	~/.config/ruvnet-brain/upgrade-notice.json	378	writeState() records notified/dismissed/acted state via recordNotified/recordDismissal/recordActed/markAsAlreadyNotified (CLI flags --dismiss/--acted/--seed or default notify path)
+scripts/upgrade-notice.mjs	write	<upgrade-notice.json>.corrupt-<timestamp>	399	backs up an existing unhealthy/corrupt state file before overwrite; only when unhealthy
+plugin/scripts/capability-claim-evidence.mjs	write	~/.cache/ruvnet-brain/capability-live-evidence.jsonl	146	appendReceipt() appends a live-surface/observation receipt from recordManagedCliObservation()/recordRegistryLatestObservation()
+plugin/scripts/capability-claim-evidence.mjs	write	<same ledger file> (rotated via tmp+rename)	150	truncates the ledger to its last 200 lines once it exceeds 1MB
+plugin/scripts/memory-doctor.mjs	none	-	-	explicitly read-only AgentDB diagnostic; opens stores with sqlite3 mode=ro[&immutable=1] only
+scripts/capability-audit.mjs	none	-	-	read-only detector suite (fs reads + env checks only); explicitly documented as read-only by intent
+scripts/nightly-wrapper.sh	external	https://ntfy.sh/$NTFY_TOPIC	44	urgent push if `cd` into the repo fails at startup
+scripts/nightly-wrapper.sh	write	$PRIMARY_ROOT/logs, $PRIMARY_ROOT/.ruvnet-brain	53	creates working directories unconditionally
+scripts/nightly-wrapper.sh	write	temp snapshot file (mktemp)	57	creates the pre-run snapshot file, populated by worktree-integrity.mjs
+scripts/nightly-wrapper.sh	spawn-repo	scripts/worktree-integrity.mjs (snapshot)	58	takes a pre-run snapshot of the primary checkout
+scripts/nightly-wrapper.sh	spawn-repo	scripts/worktree-integrity.mjs (verify)	67	verifies the primary checkout was untouched, run in the EXIT trap
+scripts/nightly-wrapper.sh	write	$PRIMARY_SNAPSHOT	71	deletes the snapshot temp file on exit
+scripts/nightly-wrapper.sh	write	$PRIMARY_ROOT/.ruvnet-brain/nightly.lock	87	single-instance lock file; stale locks from dead PIDs are cleared first
+scripts/nightly-wrapper.sh	spawn-repo	scripts/worktree-integrity.mjs	94	pre-flight integrity check before any source-writing command
+scripts/nightly-wrapper.sh	spawn-repo	scripts/self-update.mjs	101	SMOKE-mode dry run (no --apply) when NIGHTLY_SMOKE=1
+scripts/nightly-wrapper.sh	spawn-repo	scripts/self-update.mjs --apply	103	real candidate rebuild (writes tracked source) when not SMOKE
+scripts/nightly-wrapper.sh	write	$PRIMARY_ROOT/.ruvnet-brain/nightly-failure.json	117	deletes the failure marker after a successful rebuild
+scripts/nightly-wrapper.sh	write	$PRIMARY_ROOT/.ruvnet-brain/nightly-failure.json	135	writes the failure marker via python3 json.dump; only if both rebuild attempts fail
+scripts/nightly-wrapper.sh	spawn-repo	scripts/notify.sh	144	urgent phone-push escalation; only after two failed rebuild attempts
+scripts/nightly-wrapper.sh	store	$RUVNET_PROJECT_MEMORY_DB	153	`ruflo memory distill run`, best-effort (|| true)
+scripts/nightly-wrapper.sh	store	$RUVNET_PROJECT_MEMORY_DB backups	156	`ruflo memory backup --keep 14`, best-effort
+scripts/nightly-wrapper.sh	spawn-repo	plugin/scripts/lesson-bridge.mjs --apply	168	applies newly-tagged lessons into the project's memory store, best-effort
+scripts/nightly-wrapper.sh	spawn-repo	scripts/memdb-health.sh	176	AgentDB WAL/integrity drift canary, best-effort/log-only
+scripts/nightly-wrapper.sh	spawn-repo	scripts/github-health-watch.mjs	217	report-only GitHub repo/CI health watch
+scripts/nightly-wrapper.sh	spawn-repo	scripts/release-convergence-watchdog.mjs --dispatch	221	release-convergence watchdog, report-only unless every precondition is met
+scripts/nightly-wrapper.sh	spawn-repo	scripts/learning-replay.mjs --n 3 --model haiku	225	the nightly's one paid-token counterfactual lesson-transfer trap
+scripts/nightly-wrapper.sh	spawn-repo	$HOME/.cache/ruvnet-brain/kb/forge-ask-all.mjs	241	brain-health canary query against the installed cache copy; only if the file exists
+scripts/nightly-wrapper.sh	spawn-repo	scripts/notify.sh	245	urgent push if the brain-health canary fails
+scripts/nightly-wrapper.sh	spawn-repo	scripts/key-canary.mjs --notify	257	provider-key liveness canary via `zsh -lc` (real login-shell env); handles its own alive->DEAD push
+scripts/nightly-wrapper.sh	write	$PRIMARY_ROOT/logs/nightly.log	54	appends progress/output throughout the script (~20+ append points)
+kb/forge-currency.mjs	external	https://api.github.com/users/ruvnet/repos	97	read-only GET fallback used when `gh` CLI is absent/fails
+kb/forge-currency.mjs	external	gh repo list ruvnet	77	read-only query via `gh` CLI (preferred path)
+kb/forge-currency.mjs	spawn-repo	kb/forge-update.mjs --check	220	runs forge-update.mjs as a subprocess for the `brain`/default report subcommand
+kb/forge-currency.mjs	write	<local ruvnet/* clone dir>	209	`git pull --ff-only` on a stale clone; only under `update-installed --apply` (dirty trees skipped, dry-run without --apply)
+scripts/oracle/producer-hosts.mjs	external	claude / codex CLI binaries	217	spawnHost() spawns and pipes a prompt to the `claude` or `codex` executable; exported for the oracle producer caller, not invoked automatically here
+scripts/agentdb-context.mjs	none	-	-	read-only .swarm/memory.db context loader (sqlite3 -json), prints to stdout only
+scripts/brain-state.mjs	write	~/.config/ruvnet-brain/brain-off	150	setBrainOff() atomically creates the sentinel file; invoked by callers (e.g. console), not automatic
+scripts/brain-state.mjs	write	~/.config/ruvnet-brain/brain-off	167	setBrainOn() removes the sentinel file (idempotent); invoked by callers, not automatic
+explainer/api/admin-stats.mjs	external	https://api.github.com/repos/stuinfla/ruvnet-brain (+releases/traffic/issues/stargazers/forks)	31	read-only GET calls via ghJson(); traffic/clones,views,referrers additionally require GITHUB_TOKEN
+explainer/api/admin-stats.mjs	external	https://api.npmjs.org/downloads/range/last-month/ruvnet-brain	105	read-only GET for npm download stats
+explainer/api/admin-stats.mjs	external	Upstash/KV REST pipeline endpoint	66	POST executing HGETALL read commands for opt-in telemetry counters; only if a KV/Upstash store is linked
+scripts/model-router-status.mjs	spawn-repo	scripts/model-router-engine.mjs	29	execFileSync spawns the engine for a real routing decision, once per harness/tier sample (6 calls); env MODEL_ROUTER_DECISIONS redirected to a tmp preview log
+scripts/proactivity-metrics.mjs	spawn-repo	plugin/scripts/capability-registry.mjs	39	spawnSync runs the real detector with HOME redirected to synthetic "dormant"/"healthy" scratch machines
+scripts/proactivity-metrics.mjs	write	<os.tmpdir()>/gtm-* scratch dirs	60	creates (and later removes, line 112) synthetic ground-truth machine fixtures; test/measurement-fixture only
+kb/brain-alarm.mjs	write	~/.cache/ruvnet-brain/health.json	37	writeHealth() records brain up/down state from reportBrainDown()/reportBrainUp()
+kb/brain-alarm.mjs	external	https://ntfy.sh/<topic>	54	push() sends an urgent DOWN alert or recovery notice; requires NTFY_TOPIC/ntfy-topic file, throttled to 1/hour/direction, silently disabled if unconfigured
+vitest.config.mjs	none	-	-	pure Vitest configuration; no filesystem/network effects of its own
+scripts/integration-evidence.mjs	write	<--out path>	77	CLI-only: writes the built integration-evidence receipt JSON with exclusive creation (`wx`)
+scripts/sign-bundle.mjs	write	keys/ruvnet-brain-signing.pub.pem	40	genKey() writes the committed public trust-root key; only with `--gen-key`
+scripts/sign-bundle.mjs	write	.secrets/ruvnet-brain-signing.key.pem	41	genKey() writes the gitignored private key (mode 0600); only with `--gen-key`
+scripts/sign-bundle.mjs	write	<bundle>.sha256	59	signBundle() writes the digest file; default action (no `--gen-key`)
+scripts/sign-bundle.mjs	write	<bundle>.sig	62	signBundle() writes the Ed25519 signature; default action
+scripts/install-npx-witness.sh	machine	$HOME/Library/LaunchAgents/com.ruvnet.npx-witness.plist	23	writes the launchd plist via heredoc, unconditional
+scripts/install-npx-witness.sh	machine	scripts/npx-witness.sh	21	`chmod +x` on the witness script
+scripts/install-npx-witness.sh	schedule	com.ruvnet.npx-witness (launchd WatchPaths job)	43	`launchctl bootout` then `bootstrap` registers/loads the job, firing on changes under ~/.npm/_npx
+scripts/verify-nightly-close-issue4.sh	external	gh release view --json tagName/publishedAt	11	read-only query of the latest GitHub release
+scripts/verify-nightly-close-issue4.sh	external	gh issue close 4 --comment	22	closes issue #4 with a note; only if the release advanced within the last 24h (FRESH=1)
+scripts/verify-nightly-close-issue4.sh	external	gh issue comment 4 --body	25	posts an honest-failure comment on issue #4; else branch (FRESH=0)
+scripts/verify-nightly-close-issue4.sh	machine	com.ruvnet.issue4-verify (launchd job)	28	`launchctl bootout` unloads this one-shot LaunchAgent (self-removal)
+scripts/verify-nightly-close-issue4.sh	write	$HOME/Library/LaunchAgents/com.ruvnet.issue4-verify.plist	29	removes its own plist after running (one-shot cleanup)
+scripts/verify-nightly-close-issue4.sh	write	logs/issue4-verify.log	31	appends its entire run output to this log
+scripts/primer-grounding.mjs	write	<output> (caller-supplied primer path)	18	writeGroundedPrimer() writes the generated primer; throws "THIN primer" and skips the write if fewer than `minimum` (default 6) distinct citations are found
+plugin/scripts/advocacy-outcomes.mjs	write	~/.config/ruvnet-brain/advocacy-outcomes.jsonl (env override RUVNET_ADVOCACY_OUTCOMES)	270	record()->appendLine() appends one JSONL row per offer outcome; refuses the default path under vitest unless file/env override given
+plugin/scripts/advocacy-outcomes.mjs	write	<offer-claims dir>/<sha-hash>.claim	551	claimOffer() write-then-link atomic claim creation (first-time claim)
+plugin/scripts/advocacy-outcomes.mjs	write	<offer-claims dir>/<sha-hash>.claim	575	claimOffer() atomically takes over an abandoned/stale claim once its TTL expired
+plugin/scripts/advocacy-outcomes.mjs	write	<offer-claims dir>/<sha-hash>.claim	589	releaseClaim() deletes the claim file once an offer is resolved
+scripts/rvf-index-audit.mjs	store	<kbDir>/<store>.big.rvf INDEX_SEG	94	repairRvfIndex()->persistAndVerifyRvfIndex(); only runs with --repair when a store is not already PASS
+scripts/rvf-index-audit.mjs	write	<kbDir>/RVF-GENERATIONS ledger (via writeRvfGeneration)	118	restampChangedRvfGenerations(); only invoked from main() after a successful --repair pass with zero failures
+scripts/rvf-index-audit.mjs	write	<--out path>	644	main() --deep mode; only if --out <file> is given
+plugin/scripts/nightly-scheduler.mjs	write	<brainHome>/scheduler/nightly-refresh-<sha256>.mjs	149	installNightlyRunner() writes the content-addressed runner script if not already present
+plugin/scripts/nightly-scheduler.mjs	write	<brainHome>/scheduler/registration[-<identity>].json	156	installNightlyRunner() writes the registration record via tmp-file + rename
+plugin/scripts/nightly-scheduler.mjs	write	~/Library/LaunchAgents/<identity>.plist	416	installScheduler() darwin: writes the LaunchAgent plist
+plugin/scripts/nightly-scheduler.mjs	machine	launchctl bootout gui/<uid>/<identity>	419	installScheduler() darwin: unloads any prior job before (re)install; skipped when testMode
+plugin/scripts/nightly-scheduler.mjs	machine	launchctl bootstrap gui/<uid> <plist>	420	installScheduler() darwin: loads/registers the LaunchAgent; skipped when testMode
+plugin/scripts/nightly-scheduler.mjs	schedule	crontab (linux, install)	431	installScheduler() linux: rewrites the user crontab, adding the nightly line
+plugin/scripts/nightly-scheduler.mjs	write	<brainHome>/scheduler/<identity>.task.xml	448	installScheduler() windows (non-test): writes task XML for schtasks import, deleted after use
+plugin/scripts/nightly-scheduler.mjs	machine	schtasks /Create (Windows Task Scheduler)	449	installScheduler() windows: registers the scheduled task; testMode uses a fixture /Create call at line 439 instead
+plugin/scripts/nightly-scheduler.mjs	machine	launchctl bootout gui/<uid>/<identity>	464	removeScheduler() darwin: unregisters the LaunchAgent; skipped when testMode
+plugin/scripts/nightly-scheduler.mjs	write	~/Library/LaunchAgents/<identity>.plist (delete)	470	removeScheduler() darwin: removes the plist file
+plugin/scripts/nightly-scheduler.mjs	schedule	crontab (linux, remove)	478	removeScheduler() linux: rewrites the crontab with the managed line stripped
+plugin/scripts/nightly-scheduler.mjs	machine	schtasks /Delete (Windows Task Scheduler)	482	removeScheduler() windows: deletes the scheduled task
+plugin/scripts/nightly-scheduler.mjs	write	<HOME>/.ruvnet-scheduler-test/<platform>-<identity>.json	391	fixtureSchedulerRun(); test-fixture only, active when testMode && platform !== 'darwin'
+scripts/host-install-matrix.mjs	write	<os.tmpdir()>/ruvnet-host-matrix-* (mkdtemp)	135	runHostMatrix()/runHostMatrixAsync() (also line 216) create the temp workspace root when no `temp` is supplied
+scripts/host-install-matrix.mjs	write	<workspace>/bin-<mode>/{node,npm,claude,codex} (symlinks)	120	fixturePath() builds a per-mode fixture PATH by symlinking real CLIs into the temp workspace
+scripts/host-install-matrix.mjs	write	<workspace>/home-<mode>/.claude, .codex	159	runHostMode() creates fixture HOME directories before installing
+scripts/host-install-matrix.mjs	spawn-repo	<packageRoot>/bin/install.mjs	172	runHostMode() spawns the installer under test into the fixture HOME (sync)
+scripts/host-install-matrix.mjs	spawn-repo	<packageRoot>/bin/install.mjs --doctor --hooks	178	runHostMode() runs doctor after install to classify PASS/FAIL
+scripts/host-install-matrix.mjs	spawn-repo	<packageRoot>/bin/install.mjs	240	runHostMatrixAsync() spawns the installer per host mode concurrently
+scripts/host-install-matrix.mjs	spawn-repo	<RUVNET_BRAIN_KB>/forge-ask-all.mjs	263	runHostMatrixAsync() prewarm step spawns the fixture's own copy of forge-ask-all.mjs
+scripts/host-install-matrix.mjs	spawn-repo	<installed plugin>/mcp/server.mjs	390	createInstalledMcpSession() spawns the installed MCP server for the search test
+plugin/scripts/decision-gate.mjs	spawn-repo	plugin/scripts/{protect-brain-state.sh,degradation-watch.mjs,identifier-preflight.mjs,hijack-ruvnet.sh,ground-before-write.sh,design-wall.sh,adr-currency-gate.mjs,spend-guard.mjs,unprompted-runtime.mjs}	393	runPolicy() spawns each applicable policy as a captured child, in parallel, per PreToolUse Write/Bash event, within a shared time budget
+plugin/scripts/decision-gate.mjs	write	<decision-outcomes ledger via decision-outcomes.mjs>	289	best-effort resolveOutcome()/recordRefusal() after every decision (obedience measurement); wrapped so a ledger failure never breaks the tool call
+plugin/scripts/decision-gate.mjs	write	<decision-outcomes ledger via decision-outcomes.mjs>	352	reportBudget() appends a budget-exceeded record only when the time budget forced policies to be skipped
+kb/zip-extract.mjs	write	<destDir> (mkdir)	232	extractZip() creates the destination directory
+kb/zip-extract.mjs	write	<destDir>/<entry-name>	283	extractZip() writes every archive entry's bytes (directory mkdir at 265, empty file at 283, streamed inflate + atomic rename at 294/313-314)
+kb/zip-extract.mjs	write	<destDir>/<entry-name> (chmod)	320	extractZip() restores the archive's unix permission bits; skipped on win32
+plugin/scripts/codex-hook-adapter.mjs	spawn-repo	plugin/scripts/hook-shim.mjs	133	runShim() spawns the shared Claude Code hook shim once per adapted payload (one per file for a multi-file apply_patch)
+scripts/correction-detect-measure.mjs	write	<--dump-pool path>	260	main() writes the labellable candidate-pool JSONL only when --dump-pool <path> is passed
+plugin/scripts/lesson-hooks.sh	spawn-repo	plugin/scripts/hook-input.mjs (field session_id)	173	extracts the session id from the hook payload; only if hook-input.mjs is present on disk
+plugin/scripts/lesson-hooks.sh	spawn-repo	plugin/scripts/hook-input.mjs (command)	184	extracts the raw bash command text; only for the PreToolUse-bash event
+plugin/scripts/lesson-hooks.sh	spawn-repo	scripts/lesson-gate.mjs	246	main dispatch: runs the lesson gate with the resolved triggers; exit 2 propagates as a block, everything else allows
+scripts/learning-replay-cli.mjs	spawn-repo	plugin/scripts/hook-shim.mjs (unprompted-speech UserPromptSubmit)	60	wireProbe(); only invoked under --dry-run
+scripts/learning-replay-cli.mjs	write	<dirs.lessons> fixture lesson store	150	--mutant delete-lesson: saveLessons([], dirs.lessons) empties the fixture lesson store
+scripts/learning-replay-cli.mjs	write	<dirs.projectA>/.swarm/memory.db (delete)	151	--mutant delete-lesson: removeFixture() deletes the fixture memory db
+scripts/learning-replay-cli.mjs	write	<dirs.projectB>/.swarm/memory.db (delete)	155	--mutant empty-store: removeFixture() deletes the target fixture memory db
+scripts/learning-replay-cli.mjs	write	<outFile: --out or MUTANT_RESULT_FILES/PORTFOLIO_RESULT_FILES default>	163	writeArtifact() writes the dry-run result artifact; only under --dry-run
+scripts/learning-replay-cli.mjs	write	<dirs.base> fixture tree (delete)	168	cleanupFixtureDaemons()+removeFixture(base); only when !--keep-fixtures, on the --dry-run path
+scripts/learning-replay-cli.mjs	write	<outFile: --out or MUTANT_RESULT_FILES/PORTFOLIO_RESULT_FILES default>	219	writeArtifact() writes the final A/B-test result artifact on the main (non-dry-run) path
+scripts/learning-replay-cli.mjs	write	<fixture archive, via pruneArchive>	237	pruneArchive(); only when !--keep-fixtures, on the main path
+scripts/goldie-research.mjs	external	https://openrouter.ai/api/v1/models (GET)	34	fetchOpenRouterModels(); read-only price fetch, runs unconditionally each invocation
+scripts/goldie-research.mjs	write	~/.claude/model-router/catalog.json	177	main() writes refreshed prices/verified-stamps unconditionally
+scripts/goldie-research.mjs	write	~/.claude/model-router/goldie/	178	main() mkdir for the brief directory
+scripts/goldie-research.mjs	write	~/.claude/model-router/goldie/<YYYY-MM-DD>.md	215	main() writes the weekly research brief
+scripts/route-cheap.mjs	external	agentic-flow CLI (routes task to an OpenRouter model)	165	main() spawns the local agentic-flow executable; gated on routing policy === 'auto' and a resolvable OPENROUTER_API_KEY
+scripts/route-cheap.mjs	write	~/.claude/metaharness/routing-receipts.jsonl (env override METAHARNESS_RECEIPTS)	204	main() appends a cost receipt only after a successful agentic-flow run
+scripts/approved-runtime.mjs	write	--out <pin.json> (runner temp; never data/approved-runtime.json)	386	main() --resolve writes the run-time-resolved approved runtime pin (ADR-0091 D3)
+plugin/scripts/kling-preflight.sh	external	local claude CLI, --model haiku (qualitative judge)	112	runs only when the fast-path allow regexes don't already clear the prompt and $CLAUDE_BIN is executable; a failed/unparseable call fails open
+plugin/scripts/kling-preflight.sh	spawn-repo	plugin/scripts/gate-receipt.sh	144	runs only immediately before BLOCKing (MISSING non-empty), to record a gate receipt
+scripts/refresh-model-catalog.mjs	external	https://openrouter.ai/api/v1/models (GET)	89	pullLive(); unconditional on every invocation (both --check and refresh paths)
+scripts/refresh-model-catalog.mjs	write	data/openrouter-catalog-snapshot.json	116	main() writes the live snapshot; skipped under --check
+scripts/refresh-model-catalog.mjs	write	data/model-catalog.json	117	main() writes synchronized prices; skipped under --check
+scripts/restore-local-ingests.mjs	spawn-repo	scripts/ingest-repo.mjs --name <e.name>	110	main() re-ingests each missing/wiped store; only with --apply, once per missing recorded ingest
+scripts/prove.mjs	write	<ROOT>/data/ (mkdir)	55	unconditional
+scripts/prove.mjs	write	data/<outbase-lower>-results.json	56	unconditional; writes the machine-readable proof results
+scripts/prove.mjs	write	<OUTBASE>.md (default PROOF.md)	91	unconditional; writes the human-readable proof table
+plugin/scripts/session-start-issue-alert.mjs	none	-	-	purely reads cached open-issues.json and the maintainer entitlement file, then calls the caller-supplied emit() with at most one advisory line; performs no writes
+plugin/scripts/host-update.mjs	external	https://registry.npmjs.org/ruvnet-brain/latest (GET)	25	only with --check flag
+plugin/scripts/host-update.mjs	machine	npx ruvnet-brain@latest --update --host-sync-only	39	main path (no --check): installs/updates the ruvnet-brain package and syncs Claude Code/Codex host lifecycle state
+plugin/scripts/hook-shim-bash.mjs	write	<brainHome>/.no-bash-notice-shown	50	skipNoBash() writes a one-time marker file; only when no usable bash was found and the marker is not already present (function invoked by callers such as hook-shim.mjs)
+scripts/development-push-check.mjs	none	-	-	pre-push hook only reads git log patches (execFileSync git log/rev-parse) to scan additions for credential-shaped strings and throws to block the push; it never writes or pushes anything itself
+scripts/memdb-health.sh	none	-	-	read-only sqlite3 PRAGMA journal_mode/integrity_check probe against .swarm/memory.db; only echoes status and sets its exit code
+console/activity.js	none	-	-	client-side DOM/canvas module; only a GET fetch('/api/activity') (line 267), no writes/mutations
+explainer/admin.js	write	localStorage:rb-admin-token	626,637	browser-only client storage; saved on successful admin token load (626), removed on failed auth/logout (622,637)
+explainer/admin.js	write	localStorage:rb-admin-baseline	602,645,651	browser-only; seeds "since your last visit" baseline on first render (602), overwritten by "mark reviewed" (645) and restored by "undo" (651)
+explainer/admin.js	write	localStorage:rb-admin-baseline-prev	644,652	browser-only; stashes previous baseline before mark-reviewed (644), cleared by undo (652)
+explainer/api/metrics.mjs	none	-	-	Vercel API handler; only GET/read calls (GitHub REST api.github.com, npm api.npmjs.org, Upstash KV HGETALL pipeline at line 119-123) and returns JSON; no writes/mutations anywhere
+kb/card-lane.mjs	none	-	-	pure read + in-memory scoring/parsing (fs.readFileSync of capability-cards.md/repo-aliases.json/package-owners.json, cached); no writes
+kb/forge-ask-all.mjs	write	<KB_RETRIEVAL_TRACE file>	2988	conditional: only when env var KB_RETRIEVAL_TRACE is set (diagnostics append-only trace of retrieval timings)
+kb/forge-ask-all.mjs	write	<KB_CE_TRACE file>	3645	conditional: only when env var KB_CE_TRACE is set (diagnostics append-only trace of reranker candidate pool/scores)
+kb/forge-ask-all.mjs	spawn-repo	kb/brain-alarm.mjs	3739-3741,3748-3750	dynamic import() of kb/brain-alarm.mjs, calling reportBrainDown()/reportBrainUp() on all-repos-failed / all-repos-healthy transitions; that module (not in this slice) is presumed to persist alarm state and/or send an external notification — not verified here
+kb/forge-corpus.mjs	none	-	-	pure filesystem read/traverse (fs.readdirSync/readFileSync) of a source repo tree to build in-memory corpus/chunk records; no writes
+kb/forge-evidence.mjs	write	~/.cache/ruvnet-brain/evidence.jsonl (or $RUVNET_EVIDENCE_FILE)	53-60,417-426	appendEvidence(): fs.mkdirSync(dirname,{recursive:true}) + fs.appendFileSync one JSON line per grounded answer; call-site recordAnswer() (433-455) skips entirely if env RUVNET_BRAIN_EVIDENCE=0 or receipt has no sources
+kb/forge-evidence.mjs	write	~/.cache/ruvnet-brain/evidence.jsonl (or $RUVNET_EVIDENCE_FILE)	399-408	capFile(): atomic tmp-write + rename to trim the ledger to newest 400 lines once it exceeds 4MB (best-effort, invoked from appendEvidence)
+kb/lifecycle-evidence-retention.mjs	write	<brainHome>/refresh-runs/<runId>.json	204-207,231	pruneLifecycleEvidence()->quarantineAndRemove(): fs.renameSync into a `.prune-<id>-<hex>` quarantine name then fs.rmSync (delete); only fires when the refresh-receipt count/bytes exceed policy budget (32 receipts / 16MB) and the receipt is terminal+unprotected
+kb/lifecycle-evidence-retention.mjs	write	<kbDir-parent>/.<kbDir-basename>.update-transactions/<transactionId>/	204-207,231	same quarantine-then-rm path applied to storage-transaction directories once count exceeds 16 or the transaction is terminal+unprotected
+kb/refresh-run.mjs	write	<kbDir-parent>/.<kbDir-basename>.refresh-run.lock/owner.json	181-184	acquireRefreshLock(): fs.mkdirSync(staged,{mode:0o700}) + fs.writeFileSync(owner.json,{flag:'wx'}) + fs.renameSync(staged,lockPath) — the exclusive refresh-run lock
+kb/refresh-run.mjs	write	<kbDir-parent>/.<kbDir-basename>.refresh-run.lock/takeover.json	95-98	abandonDeadOwner(): fs.openSync(claimFile,'wx') + writeFileSync + fsyncSync — claims a lock whose prior owner process is confirmed dead
+kb/refresh-run.mjs	write	<brainHome>/refresh-runs/<runId>.json	106,130,243-249,263,303,315,341,357	atomicJson() tmp-write+rename helper used by abandonDeadOwner (ABANDONED receipt), openRefreshReceipt (initial RUNNING receipt), recordRefreshPhase, recordRefreshAdvisory, beginRefreshSettlement, finishRefreshReceipt — the refresh-run receipt journal (same canonical target kb/lifecycle-evidence-retention.mjs prunes)
+kb/refresh-run.mjs	write	<kbDir-parent>/.<kbDir-basename>.refresh-run.lock	216-228	releaseRefreshLock(): fs.renameSync(lock.path,quarantined) then fs.rmSync(quarantined,{recursive:true,force:true}) — deletes the lock dir on clean release (falls back to restoring it if token/runId mismatch)
+kb/shard-progress.mjs	write	<dir>/<name>.big.progress.<shardIdx>-<nShards>.json	23-28	writeShardProgress(): atomic tmp-write + fs.renameSync; per-shard embed-progress evidence used by nightly-watchdog stall detection
+kb/shard-progress.mjs	write	<dir>/<name>.big.progress.<shardIdx>-<nShards>.json	34-36	clearShardProgress(): fs.unlinkSync (delete), swallowed if the file never existed
+kb/verify-citation.mjs	none	-	-	pure read (fs.createReadStream over <repo>.passages.jsonl / .big.passages.jsonl) + regex/JSON parsing to verify a citation resolves; no writes
+plugin/mcp/managed-cli-interface.mjs	write	<RUVNET_BRAIN_HOME>/help-read/<tool>[.<subcommand>[.<subcommand>]] (default ~/.cache/ruvnet-brain/help-read/)	153-166	writeStamps() marks a managed CLI's --help as freshly read, only after exit 0 (ruvnet_cli_help)
+plugin/mcp/managed-cli-interface.mjs	external	managed executable subprocess: one of ruflo|claude-flow|agentic-flow|agentic-qe|ruvector|agent-browser|ruv-swarm, argv supplied by the MCP caller, no shell	201-243,290,333	execute() spawns the requested managed CLI; ruvnet_cli_run can run arbitrary argv (e.g. could itself trigger a git push/publish inside ruflo) once help has been read in the last 24h; side effects are argv-dependent and not statically resolvable here
+plugin/mcp/managed-cli-interface.mjs	store	registry/CLI-run observation receipt, written by recordRegistryLatestObservation()/recordManagedCliObservation() in scripts/capability-claim-evidence.mjs (not in this census file list)	278-280,292,334	delegated write; this file only calls the recorder
+plugin/scripts/advocacy-catalog.mjs	none	-	-	pure data module: frozen CAPABILITIES/INTENTS tables and regexes, no IO of any kind
+plugin/scripts/advocacy-route.mjs	write	~/.config/ruvnet-brain/advocacy-route-state.json (STATE_FILE, overridable via RUVNET_ADVOCACY_ROUTE_STATE)	166-174,391-392	writeState(): atomic per-session offer-state write (mkdir + tmp file + rename)
+plugin/scripts/advocacy-route.mjs	store	outcome ledger via record()/reconcileIgnored(), implemented in scripts/advocacy-outcomes.mjs (not in this census file list)	239,264,453	records OFFERED/APPLIED/DISMISSED/IGNORED rows for this route's recommendations
+plugin/scripts/capability-inventory-receipt.mjs	none	-	-	read-only: walks skill roots, hashes SKILL.md files, returns an in-memory receipt object; never writes it anywhere
+plugin/scripts/capacity-aware-parallel-work.mjs	none	-	-	UserPromptSubmit advisory; spawns read-only macOS pressure probes (memory_pressure/sysctl/vm_stat) and prints advisory text to stdout only, no file writes
+plugin/scripts/codex-hook-wrapper.mjs	spawn-repo	<active spine root>/scripts/codex-hook-adapter.mjs (or detached copy), resolved from ~/.cache/ruvnet-brain/active.json	168-203	Codex's hook dispatcher: spawnSync (or detached spawn for DETACHED_HOOKS like 'learn-flush') runs the adapter script and forwards stdin/argv; only runs if the active spine + adapter file exist
+plugin/scripts/continuity-hook-policy.mjs	none	-	-	pure policy/config module: exports the CONTINUITY_EVENTS table and pure lookup functions, no IO
+plugin/scripts/decision-outcomes.mjs	write	~/.config/ruvnet-brain/decision-outcomes.jsonl (LEDGER, overridable via RUVNET_DECISION_LEDGER)	91-104	append(): appends one JSON line per refusal outcome (refused/corrected/repeated/abandoned); self-truncates at ~1MB
+plugin/scripts/decision-outcomes.mjs	write	~/.config/ruvnet-brain/decision-pending.json (PENDING, overridable via RUVNET_DECISION_PENDING)	82-88,110-192	writeJson(): tracks open refusal "debts" awaiting resolution (recordRefusal/resolve/sweepStale/abandonSession)
+plugin/scripts/detach.mjs	write	$XDG_CACHE_HOME/ruvnet-brain/detached-jobs.jsonl (or ~/.cache/ruvnet-brain/detached-jobs.jsonl)	66-77,160,167,174,180	receipt(): appends start/exit/killed-at-ttl/spawn-failed lines for every detached maintenance job
+plugin/scripts/detach.mjs	write	<logPath> argv, an arbitrary caller-supplied log file path	80-86	openLog(): writes the detached job's stdout/stderr there when a real logPath (not '-'/absent) is given
+plugin/scripts/detach.mjs	spawn-repo	<cmd> argv supplied by the caller (e.g. session-start.sh launches this with `node scripts/update-apply.mjs …` or similar maintenance commands); on win32 also spawns powershell.exe as the detach mechanism	88-176	detach.mjs is a generic detached-launcher: re-execs itself as a supervisor (setsid/Start-Process) then spawns the caller's command with a TTL kill; the actual downstream script is not resolvable from this file alone
+plugin/scripts/first-session-worker.mjs	spawn-repo	<updateApply arg> --seed (named in usage as update-apply.mjs)	9-22	spawnSync of the update-apply script with --seed; exits nonzero and aborts on failure
+plugin/scripts/first-session-worker.mjs	spawn-repo	<hostUpdate arg> --check (named in usage as host-update.mjs)	24-28	spawnSync to read the current host version string
+plugin/scripts/first-session-worker.mjs	write	<versionLog arg>, an atomic write (temp file + rename)	29-33	writes the checked host version string to the version-log path passed on argv, only if the format validates
+plugin/scripts/grounding-stamp.sh	write	$HOME/.cache/ruvnet-brain/grounded/<term> (one empty marker file per matched product term: agentdb, metaharness, ruvector, aidefence, agentic-flow, agentic-qe, ruv-swarm, rvf, ruflo)	82-89	PostToolUse stamp on a genuinely successful search_ruvnet call; refuses to stamp on any known non-answer (disabled/down/error/no-results)
+plugin/scripts/grounding-stamp.sh	write	$HOME/.cache/ruvnet-brain/grounding-mode	104-111	writes "substance-bound" or "search-only" derived from evidence.jsonl's mtime
+plugin/scripts/grounding-turn-mark.mjs	write	~/.cache/ruvnet-brain/grounding-turn/<sessionId>.json (MARKER_DIR)	71-78	records that ground-ruvnet's Gate 1 fired for this turn, for the Stop-time grounding-turn-gate to check against; fail-open on any write error
+plugin/scripts/hook-registry.mjs	none	-	-	read-only census/lint CLI: reads hooks.json/settings.json/hook-shim.mjs across layers and prints a report to stdout; makes no filesystem writes
+plugin/scripts/hook-shim.mjs	write	<BRAIN_HOME>/.spine-fallback-notice	273-287	warnOnce(): records that a broken/missing spine fallback warning was already shown, so it is not repeated on every hook fire
+plugin/scripts/hook-shim.mjs	spawn-repo	<active spine>/scripts/<TABLE[hookId].file> or <PLUGIN_ROOT>/scripts/<file> — the central dispatch table names ~19 hook bodies (session-start-core.mjs, ground-ruvnet.sh, decision-gate.mjs, learn-capture.sh, learn-flush.mjs, session-snapshot-hook.mjs, md-stamp.mjs, signal-watch.mjs, routing-outcome-capture.mjs, swarm-slot-recycler.mjs, unprompted-runtime.mjs, continuation-gate.mjs, grounding-turn-mark.mjs, grounding-turn-gate.mjs, hijack-ruvnet.sh, route-dispatch.sh, ground-before-write.sh, grounding-stamp.sh, verify-interface.sh, design-wall.sh, protect-brain-state.sh)	86-172,312-356,358-381	runHook()/dispatchHook(): this file IS the master hook dispatcher for every Claude Code hook registration; it is the mechanism by which nearly every other plugin/scripts/*.mjs and *.sh file in this census actually gets invoked at runtime
+plugin/scripts/identifier-preflight.mjs	none	-	-	PreToolUse gate: reads ~/.codex/config.toml (read-only) and checks a command string against it; writes only stderr + exit code, no filesystem writes
+plugin/scripts/learn-capture.sh	write	$HOME/.cache/ruvnet-brain/learn/session-<SID>.jsonl (user scope) or <project>/.swarm/ruvnet-brain-learn/session-<SID>.jsonl (project scope, only created if that project already opted in)	135-200	appends one compact {tool,action} line per PostToolUse capture (verb/basename only, never full command args or file content)
+plugin/scripts/learn-capture.sh	write	<DIR>/.last-flush	232-236	debounce timestamp so the heartbeat flush fires at most once per minute
+plugin/scripts/learn-capture.sh	spawn-repo	plugin/scripts/learn-flush.mjs	237-239	detached `nohup node learn-flush.mjs` fired once the session queue reaches 200 lines (level-triggered heartbeat), draining the queue into the global SONA learner
+plugin/scripts/lesson-bridge.mjs	store	lesson store (lessons.json, written via updateLessons() in ./lesson-store.mjs, not in this census file list)	253,281,330-342	only on `--apply`: merges AgentDB-tagged global/project lessons into the lesson store used by lesson-gate.mjs; refuses to apply (wouldWipe guard) unless `--prune` is also given when zero candidates would replace existing bridged rows
+plugin/scripts/lesson-gate.mjs	write	~/.config/ruvnet-brain/lesson-gate-state.json (GATE_STATE_PATH)	233-239,357-374	writeGateState(): per-session frequency-cap bookkeeping for how many times an advisory lesson has been shown, written only when `--event` is passed and something will render
+plugin/scripts/lesson-promote.mjs	write	~/.claude/CLAUDE.md (or --file override) — the user's own global instructions file	217-231,257-263	applyPromotion(): on `--apply` only, replaces/appends the "Cross-project lessons" fenced block in the user's global CLAUDE.md with promoted cross-project themes
+plugin/scripts/lesson-promote.mjs	write	<file>.bak-promote-<date> (backup of the CLAUDE.md above)	222	fs.copyFileSync backup taken before every `--apply` write; the apply refuses if the backup fails
+plugin/scripts/md-stamp.mjs	write	<the .md file just touched by Write/Edit/MultiEdit>, i.e. tool_input.file_path from the PostToolUse payload	254-262,296-311	writeStampIfUnchanged(): refreshes/inserts an "Updated:" date stamp (or, in RUVNET_MD_STAMP=ensure mode, managed updated/created/digest metadata) in-place, only if the file changed and is within the project and not in an excluded dir (node_modules, .git, kb, dist, etc.)
+plugin/scripts/nightly-controller.mjs	spawn-repo	<ROOT>/bin/install.mjs --enable-nightly / --disable-nightly	71-96	applyNightlyChoice(): the only place this repo's nightly-scheduler on/off toggle is applied; the installer script (outside this census slice) is what actually writes the launchd plist / crontab entry
+plugin/scripts/project-progression-reader.mjs	none	-	-	explicitly read-only, in-process node:sqlite fast-path reader for a project's .swarm/memory.db (documented never-writes contract; falls back to the CLI on any schema mismatch)
+plugin/scripts/project-progression-sources.mjs	none	-	-	read-only: shells out to `git` (rev-parse/ls-files/diff, all read commands), reads the work-ledger JSON and Claude transcript files; produces digests/derived strings in memory only
+plugin/scripts/project-store-resolver.mjs	none	-	-	pure path-canonicalization + read-only `git rev-parse` calls to locate .swarm/memory.db; never creates or writes the store itself
+plugin/scripts/ruflo-bin.mjs	none	-	-	pure filesystem lookup (fs.existsSync/statSync) to locate the global `ruflo` binary; never executes it
+plugin/scripts/session-start-budget.mjs	none	-	-	reads plugin/hooks/hooks.json to derive per-stage latency budgets; exports constants only, no writes
+plugin/scripts/session-start-health.mjs	none	-	-	read-only local health checks (brain-off sentinel, kb cache contents, mcp-readiness.json, process.kill(pid,0) liveness probes); no writes
+plugin/scripts/session-start-repo-identity.mjs	none	-	-	read-only, local-only `git config --get remote.origin.url` via spawnSync (never network) to test whether cwd is the maintainer's own repo
+plugin/scripts/signal-watch.mjs	write	<RUVNET_BRAIN_HOME>/external-signals/pending.jsonl (SIGNAL_WATCH_PENDING override), i.e. ~/.cache/ruvnet-brain/external-signals/pending.jsonl	120-133,140-171	appendDebt(): the SOLE writer of pending.jsonl per its own header; opens a CI-verdict debt on a successful `git push` or a failing gh/vercel/netlify/npm-publish Bash invocation. NOTE: there is a DIFFERENT file scripts/signal-watch.mjs (outside this plugin/ directory, assigned to another census slice) which is the poller that only READS this same pending.jsonl via `gh run list` — same canonical target, two different files, deliberately (writer vs. reader per the file's own DDD-0013 note)
+plugin/scripts/unprompted-runtime.mjs	spawn-repo	plugin/scripts/anticipate.sh, plugin/scripts/lesson-hooks.sh, plugin/scripts/advocacy-route.mjs	151-169,249-277	spawns these as captured (stdio-piped, never inherited) candidate-mode child producers; this file is the sole writer of the final advisory/block bytes to the hook's own stdout/stderr (fd 1/2), which is process output, not a file write
+plugin/skills/release-proof/scripts/release-proof.mjs	spawn-repo	scripts/release-vector.mjs --json	280-283	collectLivePreflight(), only when includeVector is true (i.e. `--status` without `--quick`): runs the release-vector check as a subprocess and parses its JSON verdict
+scripts/adr-backfill.mjs	write	docs/adr/<NNNN-*.md> (frontmatter status/date/updated insert)	96	only with --apply; default is dry-run report, writes nothing
+scripts/agentdb-fleet-doctor.mjs	write	<project>/.swarm/memory.db.bak-fleet-doctor-<epochms>	66	backup copy made before seeding a checkpoint; only when no checkpoint exists yet
+scripts/agentdb-fleet-doctor.mjs	store	<project>/.swarm/memory.db (ruflo memory store project-state-current-<ts>)	67	seeds canonical checkpoint via ruflo CLI; conditional on missing checkpoint
+scripts/agentdb-fleet-doctor.mjs	store	<project>/.swarm/memory.db (ruflo memory distill run)	74	conditional on hasSchema (episodes table present)
+scripts/agentdb-fleet-doctor.mjs	store	<project>/.swarm/memory.db (ruflo memory store canary key)	81	round-trip verification write; runs every invocation per project argument
+scripts/ascii-drift.mjs	none	-	-	purely computational/reporting; file's own header states "IT NEVER BLOCKS AND NEVER WRITES"
+scripts/brain-grade-groundtruth.mjs	external	https://openrouter.ai/api/v1/chat/completions	41	multi-vendor grading HTTP POST, per question per configured model
+scripts/brain-grade-groundtruth.mjs	write	data/grade-<name>-<variant>.json	96	written at end of run (requires OPENROUTER_API_KEY, else exits before)
+scripts/brain-novice-50.mjs	spawn-repo	plugin/mcp/server.mjs	92	spawned as child MCP server process to drive the 50-question eval
+scripts/brain-novice-50.mjs	write	data/novice-50-report.json	180	written unconditionally at end of main()
+scripts/build-l2.mjs	external	https://openrouter.ai/api/v1/chat/completions	32	synthesis generation + 3-vendor judge grading calls
+scripts/build-l2.mjs	write	kb/l2/<slug>.md or kb/l2/rejected/<slug>.md	57	per synthesis topic; mkdir kb/l2(/rejected) at lines 40/56
+scripts/candidate-host-evidence.mjs	write	<arg --out> (candidate host evidence JSON)	100	direct CLI invocation only; flag wx refuses to overwrite
+scripts/candidate-host-evidence.mjs	write	<arg --out>.failure.json	83	only when host matrix verdict is not PASS or leaves fail
+scripts/card-from-source.mjs	write	kb/capability-cards.md and <storeRoot()>/capability-cards.md	127	only with --apply, per dark store that has a description or README prose to ground a card in
+scripts/ci/learning-replay-codex-adapter.mjs	spawn-repo	<RUVNET_REPLAY_RECORDER env path> (recorder script)	38	PreToolUse event; recorder path supplied via env var, normally a repo script
+scripts/ci/learning-replay-codex-adapter.mjs	spawn-repo	plugin/scripts/hook-shim.mjs	50	UserPromptSubmit "unprompted-speech" hook dispatch
+scripts/ci/learning-replay-codex-adapter.mjs	write	<RUVNET_REPLAY_SEQUENCE_FILE> (append lesson-fire marker)	63	only when the probe string is found in the shim's stdout
+scripts/ci/step-watchdog.mjs	write	<receiptDir>/<name>.json (CI step receipt)	53	always; records PASS/FAIL/TIMEOUT/ERROR for the wrapped command
+scripts/claims-verify.mjs	spawn-repo	scripts/sync-version.mjs	462	invoked with --check to verify version surfaces agree
+scripts/claims-verify.mjs	write	<argv --report> file	885	only when --report <path> is supplied; flag wx
+scripts/claims-verify.mjs	write	README.md, explainer/index.html, explainer/llms.txt, explainer/llms-full.txt	581	only with --fix (applyFix write:true); restamps chunk-count and coverage-% claims
+scripts/corpus-promotion.mjs	none	-	-	pure decision functions (tag/generation comparison), no I/O
+scripts/correction-detect.mjs	none	-	-	pure detector function; returns a candidate object but performs no file/store I/O itself
+scripts/development-maintenance.mjs	write	<commonDir>/ruvnet-brain-maintenance-receipts/<ts>-<uuid>.json	36	flag wx; records every suspend/resume decision
+scripts/development-maintenance.mjs	write	<status.statePath> (maintenance state file)	38	written on 'suspend' action
+scripts/development-maintenance.mjs	write	<status.statePath> deleted	40	fs.unlinkSync on 'resume' action
+scripts/dispatch-receipt.mjs	write	<receiptsPath() from ./route-cheap.mjs> (subagent dispatch receipts, jsonl)	108	appended every invocation once a valid priced model/baseline is resolved
+scripts/doc-currency.mjs	write	docs/adr/*.md, docs/ddd/*.md (frontmatter date/updated backfill)	800	only in --fix mode (and not --dry-run); values are copied only from git log, never invented
+scripts/dual-host-deliberation.mjs	none	-	-	spawns `claude`/`codex` CLIs in read-only/plan-mode sandboxes; builds a memory_store request object but performs no store/write itself unless the caller supplies its own memoryStore/persist callback
+scripts/eval-brain.mjs	spawn-repo	kb/forge-ask-all.mjs	188	per-question subprocess query against the installed brain (always, core of the run)
+scripts/eval-brain.mjs	write	evals/baseline.json	267	only with --record
+scripts/fix-metaharness-memretrieve.mjs	write	~/.npm-global/lib/node_modules/@claude-flow/cli/plugins/ruflo-metaharness/scripts/audit-list.mjs and audit-trend.mjs	78	only with --apply and only when file is present and in reverted state; patches a globally-installed npm package outside this repo
+scripts/full-hints.mjs	none	-	-	exports a static config map; CLI mode only prints JSON to stdout
+scripts/gen-images.mjs	external	https://api.openai.com/v1/images/generations	24	OpenAI image generation call (billed), gpt-image-1 with dall-e-3 fallback
+scripts/gen-images.mjs	write	explainer/assets/img/<slug>.png	41	writes each generated image; mkdir explainer/assets/img at line 8
+scripts/gist-receipts.mjs	write	<outDir>/ruv-gists.passages.jsonl, ruv-gists.meta.json, ruv-gists.sources.json	667	staged in a temp dir then promoted atomically into the live KB dir
+scripts/gist-receipts.mjs	store	<outDir>/ruv-gists.big.rvf(.idmap.json/.embed.json) and RVF-GENERATIONS.json	682	RVF vector store build + generation ledger update; skipped only if caller passes buildVector:null
+scripts/gist-receipts.mjs	spawn-repo	kb/forge-big.mjs	609	invoked (via defaultBuildVector) to embed captured gist passages into the RVF store
+scripts/github-health-watch.mjs	none	-	-	read-only reporting tool; header states it "does not push, merge, close, publish, or edit anything"
+scripts/goldie-weekly.sh	spawn-repo	scripts/goldie-research.mjs	24	deterministic weekly model-catalog refresh (layer 1)
+scripts/goldie-weekly.sh	write	logs/goldie.log	21	appended every run
+scripts/goldie-weekly.sh	write	$HOME/.claude/model-router/goldie/<date>.md	53	judgment layer (headless claude) appends its section, or a failure note, to the day's brief
+scripts/goldie-weekly.sh	external	scripts/notify.sh (phone push notification)	25	failure alert and end-of-run summary push notification
+scripts/health-repair.mjs	write	<db>.rescue-<timestamp> (sqlite backup)	87	only --repair-memory, when the store's integrity_check fails
+scripts/health-repair.mjs	store	<db> = .swarm/memory.db, REINDEX	91	only --repair-memory, when corrupt
+scripts/health-repair.mjs	spawn-repo	plugin/scripts/learn-flush.mjs	166	only --flush-learning; looped per queue file until drained or stalled
+scripts/health-repair.mjs	store	cross-project learner store (ruflo hooks intelligence --train)	212	only --train-learning
+scripts/health-repair.mjs	store	<store>/backups/* (ruflo memory backup snapshot)	281	only --distill-fleet, per distillable store, snapshot before distillation
+scripts/health-repair.mjs	store	<store> reasoning_patterns table (ruflo memory distill run)	302	only --distill-fleet
+scripts/health-repair.mjs	write	<argv --receipt> JSON (distill-fleet undo receipt)	270	only --distill-fleet --receipt <path>
+scripts/host-registry.mjs	write	<argv --out> (host registry JSON)	109	direct CLI invocation only; flag wx refuses to overwrite an existing file
+scripts/ingest-new-repos.mjs	spawn-repo	scripts/ingest-repo.mjs	113	only --apply; ingests up to --max missing repos, newest-pushed first
+scripts/install-scope.mjs	write	<project>/.claude/settings.json	556	applyScope() writes only when not dry-run and something actually changed; via CLI `<scope> --apply` or a programmatic caller (e.g. a console)
+scripts/install-scope.mjs	write	<project>/.claude/settings.json.bak-<timestamp>	552	backup taken before the write above, same conditions
+scripts/install-scope.mjs	write	<project>/.claude/settings.json	603	revertScope() restores the file from its backup; only when explicitly invoked to undo a prior applyScope
+scripts/issue-fix.mjs	write	~/.claude/ruvnet-brain/issue-fix.lock	159	acquireLock() writes the concurrency-1 lock file; supervised mode, non-dry-run only
+scripts/issue-fix.mjs	write	~/.claude/ruvnet-brain/issue-fix.lock	163	releaseLock() deletes the lock file
+scripts/issue-fix.mjs	write	~/.cache/ruvnet-brain/issue-fix-worktrees/<issue>-<ts>/	172	git worktree + local branch created for a candidate fix; supervised mode, non-dry-run only; never pushed, committed, merged, or commented (hard rule in buildPrompt)
+scripts/issue-fix.mjs	write	~/.claude/ruvnet-brain/issue-fix-logs/issue-<n>-<ts>.log	268	transcript log of the spawned claude child process; supervised, non-dry-run
+scripts/issue-fix.mjs	spawn-repo	node scripts/sync-version.mjs --check	228	only runs inside the sandboxed child Claude session's allowlisted Bash tool (ALLOWED_TOOLS); supervised mode only
+scripts/job-heartbeat.sh	write	$JOB_HEARTBEAT_DIR/<label>.json (default ~/.cache/ruvnet-brain/heartbeats/<label>.json)	84	"running" start receipt written before the wrapped command runs
+scripts/job-heartbeat.sh	write	$JOB_HEARTBEAT_DIR/<label>.json	138	terminal ok/failed/killed receipt written by finish(), atomic tmp+mv
+scripts/job-heartbeat.sh	write	$JOB_HEARTBEAT_DIR/<label>.json	113	skip-fire (exit 75) restores the prior receipt, or records an honest "skipped" if none existed
+scripts/job-heartbeat.sh	external	https://ntfy.sh/<topic>	96	urgent push on non-zero exit; conditional on NTFY_TOPIC env or ~/.cache/ruvnet-brain/ntfy-topic file being set
+scripts/learning-replay-execution.mjs	store	<cwd>/.claude-flow/routing-outcomes.json and <cwd>/.claude-flow/memory/store.json	126	via the spawned `ruflo hooks post-task --store-results` when a produced command passes the mutation filter; cwd is confined to a fixture/test world by the --path/--db root check in executeProducedCommand
+scripts/learning-replay-execution.mjs	write	<mkdtempSync tmp dir>/.claude-flow/*	182	verifyPostTaskContract() writes then immediately fs.rmSync's a throwaway probe dir while proving persistence does NOT happen without the full contract; self-cleaning, verification-only
+scripts/loop-checkpoint.mjs	write	<dir>/.ruvnet-brain/checkpoint.json	48	writeCheckpoint(), atomic tmp+rename; via CLI `write` subcommand or a programmatic caller (the unattended-loop harness)
+scripts/metaharness-router.mjs	write	~/.claude/metaharness/routing-outcomes.jsonl	165	recordOutcome() appends a labelled k-NN training row; library function with no CLI entrypoint in this file — invoked by callers
+scripts/model-router-outcome.mjs	write	~/.claude/metaharness/routing-outcomes.jsonl	54	appendOutcome() runs by default when the CLI is invoked directly (unless --summary/--help is passed)
+scripts/nightly-gists.sh	write	logs/gists-nightly.log	29	log() appends timestamped lines throughout the run
+scripts/nightly-gists.sh	write	~/.cache/ruvnet-brain/heartbeats/com.ruvnet.brain-gists.heartbeat	37	background loop writes a heartbeat timestamp every 30s while the job runs
+scripts/nightly-gists.sh	spawn-repo	node scripts/ingest-gists.mjs --index-only	52	always run (cheap index refresh, no per-gist fetch)
+scripts/nightly-gists.sh	spawn-repo	node scripts/ingest-gists.mjs	56	incremental content ingest of changed gists
+scripts/nightly-gists.sh	spawn-repo	node kb/forge-big.mjs shard-all --dir kb --name ruv-gists --shards 8 --stall-minutes 15	81	only runs when step 2 reports the corpus changed
+scripts/nightly-gists.sh	spawn-repo	node kb/forge-big.mjs ingest --dir kb --name ruv-gists	85	only after a successful shard-all; rebuilds the ruv-gists store
+scripts/nightly-watchdog.mjs	write	~/.cache/ruvnet-brain/watchdog-state.json	239	saveState() persists per-label alert state every run
+scripts/nightly-watchdog.mjs	external	https://ntfy.sh/<topic>	251	push() POSTs an alert on any OK<->bad state transition; conditional on NTFY_TOPIC env or the topic file
+scripts/no-silent-substitution.mjs	none	-	-	pure read/audit CLI; scans scripts/bin/plugin source files and prints violations, writes nothing
+scripts/npx-witness.sh	write	~/.claude/logs/npx-witness.log	54	appends a ~/.npm/_npx cache + live-process snapshot every time launchd fires on a cache change; append-only observer, never deletes anything
+scripts/oracle/repo-recall.mjs	write	<--out file, default <bundle>.recall.json>	417	CLI writes the repo-recall report JSON when invoked with --bundle or --kb
+scripts/oracle/repo-recall.mjs	write	<os.tmpdir()>/repo-recall-*/	379	extracts the candidate archive there to measure it; removed via fs.rmSync in a finally block (self-cleaning)
+scripts/oracle/source-tree.mjs	write	<--out file>	145	CLI writes the source-tree snapshot manifest JSON when --out is given (else stdout only)
+scripts/oracle/validate-labels.mjs	write	<--out file>	229	CLI writes the label-validation report JSON when --out is given (else stdout only)
+scripts/prepublication-evidence.mjs	write	<--leaves-out file>	215	CLI writes the evidence leaves array JSON (flag 'wx', refuses to overwrite an existing file)
+scripts/prepublication-evidence.mjs	write	<--envelope-out file>	216	CLI writes the aggregated envelope JSON (flag 'wx', refuses to overwrite)
+scripts/private-overlay.mjs	write	<root>/RVF-GENERATIONS.json	204	adds a private store's generation row (name, sha256, model, dimensions)
+scripts/private-overlay.mjs	write	<root>/repo-aliases.json	205	adds alias entries for a private store, only if --alias was passed
+scripts/private-overlay.mjs	write	<root>/capability-cards.md	206	appends a `## <name>` capability card for the store
+scripts/private-overlay.mjs	write	<root>/SOURCE.json	207	flags the private store's entry as updateManaged:false (written last, after bytes/ledger/aliases/cards)
+scripts/private-overlay.mjs	write	<root>/private-overlay-receipt.json	208	records the receipt of this overlay run
+scripts/private-overlay.mjs	write	<root>/<registry-file>.pre-overlay-<epoch>	195	snapshot backup of each registry file this run is about to change, taken before any write
+scripts/private-overlay.mjs	write	<root>/<name>.big.rvf and required/optional sidecar files	203	copies the store's RVF + sidecars from --from into the live brain root
+scripts/product-integrity-contract.mjs	write	<--out file, --trace mode>	171	writes a product-integrity trace JSON (flag 'wx', refuses overwrite); only fires when --trace, --source-sha <sha> and --out <file> are all supplied together
+scripts/proxy/proxy-verify.mjs	external	http://127.0.0.1:11435/v1/messages	94	live completion POST to the local Meta LLM Proxy, part of the trial's end-to-end verification (not durable state, but an outbound network call)
+scripts/public-verification-aggregate.mjs	write	<--out file>	345	generatePublicVerificationAggregate() writes the signed 9-lane aggregate JSON (flag 'wx', refuses overwrite); requires RUVNET_SIGNING_KEY env
+scripts/public-verification-inputs.mjs	write	<outFile>, default release-evidence/baseline-verification-receipt.json	355	createReceiptedBaselineVerification()
+scripts/public-verification-inputs.mjs	write	<outFile>, default release-evidence/baseline-verification-receipt.json	381	createRetrospectiveBaselineVerification()
+scripts/public-verification-inputs.mjs	write	<outFile>, default release-evidence/baseline-observation-receipt.json	397	createObservedBaselineReceipt()
+scripts/public-verification-inputs.mjs	write	<outDir>/{COVERAGE.json, retrieval-baseline.json, retrieval-candidate.json, retrieval-canary-plan.json, baseline-*-receipt.json}	503	createPublicVerificationInputs() writes exact-byte outputs (flag 'wx'; fails loudly if an existing file differs)
+scripts/public-verification-inputs.mjs	write	<os.tmpdir()>/public-verification-inputs-*/	428	extracts the baseline + candidate archives there to validate them; removed in a finally block (self-cleaning)
+scripts/publication-receipt.mjs	write	<outPath>, e.g. release-evidence/publication-receipt.json	765	generatePublicationReceipt()'s final write (flag 'wx', refuses to overwrite an existing receipt)
+scripts/publication-receipt.mjs	write	<os.tmpdir()>/ruvnet-public-install-*/ (isolated per-host HOME dirs)	456	downloads the public npm/GitHub artifacts and installs the plugin into isolated temp HOMEs to prove the public install works; removed via dispose() on success, retained on failure for diagnostics (line 413)
+scripts/publication-receipt.mjs	spawn	bin/install.mjs (the real installer, extracted from the downloaded npm package copy)	511	runs the actual installer against an isolated temp HOME to prove the public release installs; confined to the temp sandbox, not this checkout's own bin/install.mjs
+scripts/qa-contract.mjs	none	-	-	pure helper library (verdict aggregation, read-only git-derived source digest via `git rev-parse/ls-files/status`, lane scheduling); performs no I/O of its own
+scripts/qe/card-lane-gate.mjs	none	-	-	pure in-process timing harness; reads kb/card-lane-budget.json and plugin/test/capability-questions.json, no writes
+scripts/qe/ux-suite.mjs	write	<UX_QE_EVIDENCE or --json-out path>	245	writeEvidence(); only when --json-out flag or UX_QE_EVIDENCE env var set
+scripts/qe/ux-suite.mjs	spawn-repo	tests/ux/render-probe.mjs	63	runRenderProbeIsolated() spawns the render probe as its own process group with a 60s watchdog
+scripts/qe/ux-suite.mjs	external	aqe task submit (local aqe fleet coordinator)	254	tryRegisterAqeTask(); best-effort, never fails the suite, no model billed
+scripts/rebuild-gists-from-receipts.mjs	write	<outDir>/ruv-gists.passages.jsonl	204	writeReconstruction(); temp-write-then-rename (flag 'wx'), CLI/main() path only
+scripts/rebuild-gists-from-receipts.mjs	write	<outDir>/ruv-gists.meta.json	204	writeReconstruction(); same temp-then-rename pattern as passages file
+scripts/rebuild-gists-from-receipts.mjs	write	<outDir>/ruv-gists.sources.json	204	writeReconstruction(); same temp-then-rename pattern as passages file
+scripts/record-lesson.mjs	store	.swarm/memory.db	77	`ruflo memory store -k <key> -n <ns> --value <value>`; also `ruflo memory distill run` at line 104 refines the same store
+scripts/release-abort-stale.mjs	write	<tmp>/abort-*/release-transaction-XXXX.json	112	scratch receipt file in os.tmpdir(), only under --apply
+scripts/release-abort-stale.mjs	publish	GitHub release asset (release-transaction-XXXX.json on tag)	113	`gh release upload <TAG> <tmp> --clobber`; only under --apply, requires --tag and a genuinely non-terminal/abandoned transaction
+scripts/release-channel-kind.mjs	none	-	-	deliberately pure predicate module; header states "no network, no gh, no fetch"
+scripts/release-payload.mjs	write	release-evidence/payload-manifest.json (default; --out overrides)	77	CLI `create` subcommand; fs.writeFileSync flag 'wx' mode 0600
+scripts/release-payload.mjs	write	<--out signature file>	86	CLI `sign` subcommand; refuses to overwrite an existing signature file
+scripts/release-qualification.mjs	write	<--report path> (required arg)	121	runQualification(); fs.writeFileSync flag 'wx' mode 0600, refuses if path already exists
+scripts/release-qualification.mjs	spawn-repo	scripts/ci/step-watchdog.mjs	81	execute(); step-watchdog in turn runs scripts/sync-version.mjs --check, scripts/convergence-manifest.mjs, scripts/hook-retirement-check.mjs, and vitest, per suite
+scripts/release-transaction.mjs	none	-	-	pure state-machine/orchestration module (no fs/network imports); actual GitHub/npm mutations (appendReceipt, uploadAssets, stageNpm, promoteNpm, publishDraftNonLatest, makeGithubLatest, restoreNpmLatest) are performed by a caller-supplied `adapter` object, not by this file
+scripts/release.mjs	spawn-repo	scripts/sync-version.mjs	508	check-only mode step A, `runOrDie(... ['scripts/sync-version.mjs','--check'])`
+scripts/release.mjs	spawn-repo	scripts/release-authority.mjs	509	check-only mode step A
+scripts/release.mjs	spawn-repo	scripts/release-qualification.mjs	524	check-only mode step B (`--suite source --report <tmpfile>`), which itself writes a report and spawns further scripts (see that file's row)
+scripts/release.mjs	publish	npm dist-tag + GitHub release (via runReleaseTransaction/liveReleaseProvider adapter)	580	--publish mode only; gated behind protected-release workflow invocation with a signed candidate receipt (validateProtectedPublishInvocation)
+scripts/release.mjs	write	release-evidence/<publication identity+receipt> (paths via RUVNET_RELEASE_IDENTITY/RUVNET_CHANNEL_RECEIPT)	591	materializePublicationHandoff(); --publish mode only
+scripts/release.mjs	publish	GitHub release (corpus-sha256-* tag, create/upload assets/edit --latest)	392	runProtectedCorpusSeed(); --corpus-seed mode only, never combined with --publish; bootstrap create at line 332, customer draft-create+promote-to-latest at lines 392/416
+scripts/rerank-cap-warm-ab.mjs	write	<os.tmpdir()>/ce-<mode>-warm-ab-<cap|cascade>.json (or --out)	93	fs.writeFileSync(OUT, ...) after the paired warm A/B run
+scripts/retrieval-canary.mjs	write	release-evidence/retrieval-canary-plan.json (default; --out overrides)	665	buildPlanFromFiles(); fs.writeFileSync flag 'wx' mode 0600; CLI default path (not --audit)
+scripts/routing-flywheel.mjs	write	~/.claude/model-router/policy.candidate.mjs (CANDIDATE_PATH_DEFAULT, or --out)	364	writeCandidatePolicy(); only when a generation clears the frozen promotion gate; refuses to ever write policy.mjs itself
+scripts/routing-flywheel.mjs	write	~/.claude/metaharness/flywheel-receipts.jsonl (RECEIPTS_PATH_DEFAULT, or --receipts)	370	appendReceipt(); fs.appendFileSync, every run (dry-run excluded)
+scripts/routing-flywheel.mjs	external	https://openrouter.ai/api/v1/chat/completions	295	makeLiveProposer(); only --live mode with OPENROUTER_API_KEY, spend capped at $0.50/run
+scripts/run-operational-benchmark.v3.mjs	write	evals/operational-runs/v3-<timestamp>.json	185	main(); fs.writeFileSync, CLI entrypoint only
+scripts/run-operational-benchmark.v3.mjs	spawn-repo	<kb>/forge-ask-all.mjs (installed KB copy; RUVNET_BRAIN_KB or ~/.cache/ruvnet-brain/kb)	72	execFileAsync(reader, ...) per fixture, unless a custom runQuery is injected; same code as repo's kb/forge-ask-all.mjs but the installed/cached copy
+scripts/rvf-wire.mjs	none	-	-	read-only RVF binary-format parser (fs.openSync/readSync only); no writes
+scripts/selfcheck.mjs	write	~/.cache/ruvnet-brain/install-state.json (installStatePath(), XDG_CACHE_HOME-aware)	161	writeInstallState(); exported for callers (e.g. bin/install.mjs) to invoke — this file's own CLI path does not call it itself
+scripts/selfcheck.mjs	spawn-repo	every registration in the installed hooks.json (plugin/scripts/hook-shim.mjs and downstream handlers)	359	fireHook(), invoked from runBattery(); ACTUALLY FIRES each installed hook under 4 synthetic stdin regimes (valid/empty/garbage/held) then SIGTERM/SIGKILLs its process group — the file's central real-world effect, skipped only if legacy/stale registrations are detected first
+scripts/signal-watch.mjs	write	~/.cache/ruvnet-brain/external-signals/ci-status.json (RUVNET_SIGNAL_DIR-aware)	90	saveJson() inside pollOnce(); sole writer of this file per its own header note
+scripts/source-scope-receipt.mjs	none	-	-	pure module: `git ls-files` + sha256 hashing to build/validate a receipt object in memory; does not persist it
+scripts/staged-host-verifier.mjs	write	<os.tmpdir()>/ruvnet-staged-host-* (ephemeral)	67	preparePackage() mkdtemps, extracts tar+zip into it, then fs.rmSync(recursive,force) cleans it up at line 122 in every path (success or throw) — no persistent effect
+scripts/subscription-hosts.mjs	none	-	-	spawns `claude auth status --json` / `codex login status` as read-only probes; no writes or mutations
+scripts/sync-commands.mjs	write	plugin/commands/rvcb.md, plugin/commands/brain-console.md, plugin/commands/configure.md	98	regenerates each alias body from the canonical plugin/commands/rvbc.md when it has drifted; skipped entirely under --check
+scripts/top100-semantic-assertions.mjs	none	-	-	pure frozen data/config module (semantic assertion clauses) plus lookup helpers; no I/O
+scripts/update-apply.mjs	spawn-repo	plugin/scripts/update-apply.mjs	9	thin repo-side wrapper forwarding argv+stdio to the real Stable Spine engine shipped inside the plugin payload
+scripts/verify-bundle.mjs	none	-	-	pure Ed25519 signature verification over files already on disk; no writes
+scripts/version.mjs	none	-	-	reads plugin/.claude-plugin/plugin.json and prints the version; no writes
+scripts/worktree-integrity.mjs	none	-	-	read-only `git rev-parse`/`status`/`diff`/`ls-files` inspection and classification; CLI prints JSON to stdout, never mutates the checkout
+tri-smart-skill/tri-smart/scripts/review.mjs	store	.swarm/memory.db	90	persistBlockedCheckpoint(); `ruflo memory store --key trismart-blocked-* --namespace ruvnet-brain --path <cwd>/.swarm/memory.db`; only when the proposal/critique/synthesis stage is blocked
+tri-smart-skill/tri-smart/scripts/review.mjs	spawn-repo	tri-smart-skill/tri-smart/scripts/verify-access.mjs	32	access(); spawnSync of the sibling verifier at the start of every non-dry-run invocation
+tri-smart-skill/tri-smart/scripts/review.mjs	external	claude / codex / grok subscription CLIs	36	call(); real (metered/subscription, non-API-key) calls to three external provider CLIs for independent proposals, critiques, synthesis and verification passes
+tri-smart-skill/tri-smart/scripts/verify-access.mjs	external	claude / codex / grok subscription CLIs	89	real single-prompt probe calls to each selected provider CLI, only when invoked with --probe (auth-status checks otherwise are read-only)

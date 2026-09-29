@@ -20,7 +20,7 @@
 // Usage: node scripts/router-utilization.mjs [--json]
 
 import fs from 'node:fs';
-import { FRONTIER, priceOf, receiptsPath } from './route-cheap.mjs';
+import { CLAUDE_MODEL_IDS, FRONTIER, priceOf, receiptsPath } from './route-cheap.mjs';
 
 // Band = a human-legible grouping over the continuous complexity/cost axis (ADR-149: "tier_label is
 // metadata, not control flow"). The four bands mirror router-optimizer.mjs. Known models are mapped
@@ -28,15 +28,15 @@ import { FRONTIER, priceOf, receiptsPath } from './route-cheap.mjs';
 const BAND_BY_MODEL = {
   'agent-booster': 'mechanical',
   'inclusionai/ling-2.6-flash': 'cheap',
-  'claude-haiku-4.5': 'cheap',
+  [CLAUDE_MODEL_IDS.haiku]: 'cheap',
   'deepseek/deepseek-chat': 'cheap',
   'deepseek/deepseek-v4-flash': 'cheap',
   'meta-llama/llama-3.3-70b-instruct': 'mid',
   'openai/gpt-4.1': 'mid',
   'x-ai/grok-4.5': 'mid',
-  'claude-sonnet-5': 'mid',
-  'claude-opus-4.8': 'frontier',
-  'claude-fable-5': 'frontier',
+  [CLAUDE_MODEL_IDS.sonnet]: 'mid',
+  [CLAUDE_MODEL_IDS.opus]: 'frontier',
+  [CLAUDE_MODEL_IDS.fable]: 'frontier',
 };
 export const BAND_ORDER = ['mechanical', 'cheap', 'mid', 'frontier'];
 const BAND_LABEL = { mechanical: 'Mechanical', cheap: 'Cheap', mid: 'Mid', frontier: 'Frontier' };

@@ -3,9 +3,9 @@ id: ADR-071
 title: Facts are generated, behaviours are tested — retire the fact-gates
 status: Proposed
 date: 2026-08-10
-updated: 2026-09-11
-updated_source: authored-current
-reviewed_digest: c36a9b076f17
+updated: 2026-09-27
+updated_source: derived-from-git
+reviewed_digest: 91427984f8d2
 authors: [Stuart Kerr, Claude Code]
 tags: [architecture, gates, drift, simplification]
 supersedes: []
@@ -113,6 +113,7 @@ publisher, host-convergence, idle-exit and refusal tests all stay.
   ADR exists to stop: trusting a measurement because it was convenient.
 
 ## Currency log
+| 2026-09-27 | Currency review: decision unchanged. Motion: sync-version.mjs fixes closing single-source-check gaps and validating Codex post-tool output. The facts-generated/behaviours-tested split is unchanged. | Reviewed `scripts/sync-version.mjs`, `scripts/sync-census.mjs`, `tests/unit/no-restated-truth.test.mjs` against the commits listed above; reviewed_digest 91427984f8d2. |
 
 | Date | What changed | Why (with referents) |
 |---|---|---|

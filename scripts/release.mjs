@@ -1,30 +1,38 @@
 #!/usr/bin/env node
-// scripts/release.mjs — the DEFINITION OF DONE. The only path to the word "shipped."
+// scripts/release.mjs — the ONLY publisher, plus a local preview of the CI qualification gate.
 //
 // WHY (2026-07-17, Stuart): "You should be able to take the applied knowledge and build it into a set
 // of criteria that you always use, not a bunch of suggestions you choose to ignore." Every failure
 // this session was an ASSUMPTION that survived because the check was a suggestion, not a gate. This
-// script turns the checklist into a gate: it runs the criteria in order, STOPS on the first failure,
-// and only prints "SHIPPED" when every channel a user touches is proven current and working. There is
-// no "I think it's fine" — there is pass or fail.
+// script turns the checklist into a gate: it runs the criteria in order and STOPS on the first
+// failure. There is no "I think it's fine" — there is pass or fail.
 //
-// Check-only mode evaluates source. Publish mode consumes a CI-sealed package and receipt, then
-// performs only the staged transaction and public verification. It never rebuilds or retests the
-// source: the immutable artifact is the evidence boundary.
+// WHAT EACH MODE ACTUALLY DOES (rewritten 2026-09-26, consolidation/single-source — the previous
+// header called check-only "the DEFINITION OF DONE" and claimed it alone decided "shipped"; that was
+// never true and duplicated a second, drifting gate list alongside CI's real one). Publishing a
+// release — creating the GitHub Release, moving the npm dist-tag — happens ONLY inside the
+// reviewer-protected `protected-release.yml` workflow, against an exact-SHA CI-sealed candidate;
+// `--publish` mode is that workflow's publisher (it validates the protected-invocation receipt before
+// doing anything and refuses outside it), never rebuilds or retests source, and treats the immutable
+// artifact as the evidence boundary. `--check` mode is a read-only LOCAL PREVIEW for a human on a dev
+// branch: it runs the exact same release-qualification gate CI enforces
+// (`scripts/release-qualification.mjs` + `scripts/release-qualification-contract.mjs`, invoked the
+// same way `canonical-qa.yml`/`ci.yml` invoke it) plus the one-publisher check
+// (`scripts/release-authority.mjs`). There is exactly ONE definition of "release-qualified" — the one
+// CI enforces — and this is a preview of it, not a second, independent one.
 //
 // Usage:
-//   node scripts/release.mjs --check          # run every gate READ-ONLY (no publish) — the pre-flight
-//   node scripts/release.mjs --publish        # publish the exact CI-sealed artifact
+//   node scripts/release.mjs --check          # preview the SAME qualification gate CI enforces
+//   node scripts/release.mjs --publish        # the protected workflow's publisher; not for manual use
 //   node scripts/release.mjs                   # same as --check
 //
 // The gates, in order (fail fast):
-//   A. version single-source-of-truth agrees (sync-version --check)
-//   B. full test suite green (npm test — the 60/60)
-//   C. narrative + unit gates (vitest) incl. the tag/entity-aware "What's new" check
+//   A. version single-source-of-truth agrees (sync-version --check) + one protected publisher
+//   B. release qualification — scripts/release-qualification.mjs, invoked exactly as CI invokes it
 //   D. [--publish only] stage and promote the exact package plus signed RVF bundle
-//   E. [--check only] verify current public channels; publish verifies them inside transaction finalization
 
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -52,8 +60,8 @@ const recallNotes = (receipt) => {
       + ` about themselves from their own content; ${r.exactFileTop5}/${r.questions} return the exact`
       + ` labeled file in the top 5 (floor ${r.floor}).`,
     'NOT measured: generated-answer correctness, citation support, or unscoped whole-corpus discovery.',
-    `ADR-086 C3 was NOT met and is NOT claimed — its measurement ships as ${receipt.accuracyReport.file}`
-      + ' for inspection.',
+    `ADR-086 C3 was NOT met and is NOT claimed — its diagnostic measurement (a declared question sample`
+      + ` when its coverage.bounded says so) ships as ${receipt.accuracyReport.file} for inspection.`,
   ];
 };
 import { verifyBundle } from './verify-bundle.mjs';
@@ -156,6 +164,12 @@ export async function runProtectedCorpusSeed({
   } catch (error) {
     corpusFailure(`corpus receipt is unreadable/corrupt (${error.message})`);
   }
+  // EXACT equality, never "GITHUB_SHA or an ancestor of it" (independent review of ADR-0091 D3,
+  // 2026-09-28). Accepting an ancestor let the unattended corpus job promote an OLDER runtime over the
+  // current live code release as `releases/latest` — fresh installs then fail on a version mismatch
+  // and already-updated clients refuse it as incompatible. The corpus is built at the newest
+  // install-verified release's sourceSha, and that must BE the protected main commit this run executes.
+  // The format check runs first; the comparisons below never hand the value to a subprocess.
   if (!isHex(target, 40) || target !== head || target !== env.GITHUB_SHA || target !== receipt.builderSourceSha) {
     corpusFailure('target must exactly equal HEAD, GITHUB_SHA, and the corpus receipt builderSourceSha');
   }
@@ -202,10 +216,11 @@ export async function runProtectedCorpusSeed({
 
   // ADR-086 Step 15's second binding. The detached accuracy report travels beside the archive; this
   // proves (a) the file the receipt names is the file present here, byte for byte, (b) the report
-  // was measured against THESE archive bytes, (c) every partition in both query modes passed
-  // 20x>=19x with no timeouts and no bounded sampling, and (d) it was produced by the committed
-  // benchmark against the committed oracle — so a swapped oracle or a patched benchmark is caught
-  // here even though the receipt itself carries only {file, sha256, bytes}.
+  // was measured against THESE archive bytes, and (c) it was produced by the committed benchmark
+  // against the committed oracle — so a swapped oracle or a patched benchmark is caught here even
+  // though the receipt itself carries only {file, sha256, bytes}. It does NOT check the score or
+  // coverage completeness: C3 is a diagnostic (ADR-086 amendment 2026-09-15), and the corpus
+  // pipeline measures a declared question sample of it (ADR-0091 D2).
   const accuracyReportFile = `${bundleFile}.accuracy.json`;
   if (receipt.accuracyReport.file !== path.basename(accuracyReportFile)) {
     corpusFailure('corpus receipt names an accuracy report that is not the one beside this archive');
@@ -500,71 +515,22 @@ if (!PUBLISH) {
   runOrDie('version sync', process.execPath, ['scripts/sync-version.mjs', '--check']);
   runOrDie('one protected publisher', process.execPath, ['scripts/release-authority.mjs']);
 
-// WIRED-CHECK — refuses to ship a module with zero callers.
+// RELEASE QUALIFICATION — ONE definition of "release-qualified", the one CI enforces.
 //
-// Added 2026-07-22 after this project shipped built-tested-unwired code SEVEN times in one session
-// (capability-registry, capability-audit, lesson-gate's five triggers, anticipate.sh,
-// advocacy-outcomes, lesson-promote's demotion, continuation-gate's global path). Every one had
-// passing tests, because a test imports the module directly — the one caller that proves nothing
-// about whether the product uses it. Every one was found by a human running grep, hours later.
-//
-// Seven repetitions of one mistake is not a discipline problem; discipline is what failed. So it
-// becomes a gate, on the ship path, where this repo's gates run 8/8 against prose's 0/6.
-  runOrDie('wired (no orphan modules)', process.execPath, ['scripts/wired-check.mjs', '--check']);
-
-// THE NORTH-STAR PROMOTION VECTOR — strict/check-only releases may not average one broken or
-// unknown invariant into a pass. The separately authorized stabilization class makes no 95 claim;
-// it retains every safety, test, artifact, publication, and post-publication gate below while the
-// promotion program remains open. Derive this only from the already-validated sealed receipt, never
-// from a free-standing environment toggle.
-  if (protectedReleaseMode === 'strict') {
-    runOrDie('release vector (all critical invariants PASS)', process.execPath, ['scripts/release-vector.mjs']);
-
-  // The Top-100 corpus spans naive through expert prompts and grades semantic clauses, citations,
-  // abstention, and latency. A manual-only benchmark is a report; a strict release-path benchmark
-  // is a guarantee. The benchmark itself fails closed unless all 100 canonical questions run.
-    runOrDie('Top-100 source-grounded recall contract', process.execPath, ['scripts/top100-benchmark.mjs', '--no-write']);
-  } else {
-    console.log(c.y('  strict >=95 promotion gates: NOT CLAIMED (sealed stabilization; scoreClaimed:false)'));
-  }
-
-// A2. Stable Spine restart classifier (ADR-023, red-team finding 18): diff the boot-frozen SHELL
-// (hooks.json, hook-shim, MCP server, .mcp.json, skills/, commands/) against the previous release
-// tag and SAY OUT LOUD whether this release needs a restart. The classification is computed, never
-// remembered — the same shellDiff logic runs client-side in update-apply.mjs at every flip, so the
-// user-facing nag stays honest even if this print is ignored. Informational at ship time; the
-// releasing human sees exactly which shell files changed.
-  step('A2', 'Stable Spine — does this release change the boot-frozen shell? (requiresRestart classifier)');
+// Rewritten 2026-09-26 (consolidation/single-source). Before this change, check-only mode ran its
+// OWN separate gate list (npm test, vitest tests/unit, release-vector.mjs, top100-benchmark.mjs,
+// wired-check.mjs, a Stable-Spine restart print, and a live verify-channels.mjs walk) that had
+// drifted from — and duplicated — the actual contract CI enforces in
+// scripts/release-qualification-contract.mjs. Two lists of "what counts as qualified" is exactly how
+// a local PASS stops meaning what CI's PASS means. There is now one contract; this runs it locally,
+// read-only, the same way canonical-qa.yml's `qualify-development` job runs it on every push/PR.
+  step('B', 'release qualification — the same gate CI enforces (release-qualification.mjs)');
   {
-  const { execFileSync } = await import('node:child_process');
-  const SHELL = ['plugin/hooks/hooks.json', 'plugin/scripts/hook-shim.mjs', 'plugin/mcp/server.mjs', 'plugin/.mcp.json', 'plugin/skills', 'plugin/commands'];
-  let prevTag = '';
-  try { prevTag = execFileSync('git', ['describe', '--tags', '--abbrev=0'], { encoding: 'utf8' }).trim(); } catch { /* no tags yet */ }
-  if (!prevTag) {
-    console.log(c.dim('  no previous release tag — classifier has no baseline (first spine release: requiresRestart=true by definition)'));
-  } else {
-    let changed = [];
-    try {
-      const out = execFileSync('git', ['diff', '--name-only', `${prevTag}..HEAD`, '--', ...SHELL], { encoding: 'utf8' }).trim();
-      changed = out ? out.split('\n') : [];
-    } catch { /* diff failure = unknown; say so, never guess green */ changed = ['(diff failed — treat as changed)']; }
-    if (changed.length) {
-      console.log(`  ${c.y('requiresRestart: TRUE')} — shell changed vs ${prevTag}:`);
-      for (const f of changed) console.log(`    · ${f}`);
-      console.log(c.dim('  users get ONE honest restart notice (session-start reads active.json.shellChanged); everything else is live.'));
-    } else {
-      console.log(`  ${c.g('requiresRestart: false')} — no shell change vs ${prevTag}; this release goes fully live with zero restarts.`);
-    }
+    const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ruvnet-brain-release-qualification-'));
+    const reportPath = path.join(reportDir, 'source-qualification.json');
+    runOrDie('release qualification (source)', process.execPath,
+      ['scripts/release-qualification.mjs', '--suite', 'source', '--report', reportPath]);
   }
-  }
-
-// B. the full brain test suite (the 60/60)
-  step('B', 'full test suite (npm test)');
-  runOrDie('npm test', 'npm', ['test']);
-
-// C. unit gates — narrative-version (tag/entity aware), claims, etc.
-  step('C', 'unit gates (vitest) — narrative version, claims, guards');
-  runOrDie('vitest unit', 'npx', ['vitest', 'run', 'tests/unit']);
 }
 
 // D. One remotely durable, staged release transaction (ADR-062 / DDD-0015). GitHub remains a draft
@@ -632,13 +598,6 @@ if (PUBLISH) {
   materializePublicationHandoff({ paths: publicationHandoffPaths, identity, receipt: finalReceipt, publicKey });
 } else {
   step('D', 'remote staged release transaction — SKIPPED (check-only; pass --publish to publish)');
-}
-
-// Check-only diagnoses the currently public channels. During publication, transaction finalization
-// performs this walk once, then creates and verifies the publication receipt before convergence.
-if (!PUBLISH) {
-  step('E', 'verify-channels — the live walk of every user path');
-  runOrDie('verify-channels', process.execPath, ['scripts/verify-channels.mjs']);
 }
 
 if (PUBLISH) {

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Exact 40-character SHA currently at origin/main
+        description: Exact 40-character SHA currently at origin/main (must also be the newest install-verified code release's source)
         required: true
         type: string
       seed_tag:
@@ -90,14 +90,30 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require the exact clean current main source
+      - name: Require the exact clean current main source, which must be the approved install-verified runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || { echo 'candidate checkout SHA mismatch' >&2; exit 1; }
+          # EXACT equality with origin/main, never "reachable from" it (independent review of ADR-0091 D3,
+          # 2026-09-28): an ancestor let the unattended job build and promote an OLDER runtime over the
+          # live code release.
           test "$(git rev-parse origin/main)" = "$EXPECTED_SHA" || { echo 'candidate is not current origin/main' >&2; exit 1; }
           test -z "$(git status --porcelain)" || { echo 'candidate checkout is dirty before reconciliation' >&2; exit 1; }
+          # ADR-0091 D3: the corpus is built AT the approved runtime's own source, so the archive's
+          # executables equal that release by construction. main HEAD must therefore BE the sourceSha of
+          # the newest code release, whose signed aggregate must verify (no fallback to older releases).
+          grep -q 'export async function resolveApprovedRuntime' scripts/approved-runtime.mjs || {
+            echo 'candidate predates ADR-0091 D3 (no approved-runtime resolver); it cannot prove it is the approved runtime' >&2; exit 1; }
+          node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY" \
+            --out "$RUNNER_TEMP/approved-runtime.json" > "$RUNNER_TEMP/approved-release.json"
+          approved_sha="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').sourceSha")"
+          test "$approved_sha" = "$EXPECTED_SHA" || {
+            echo "candidate $EXPECTED_SHA is not the approved runtime source $approved_sha (the newest code release)" >&2; exit 1; }
+          test -z "$(git status --porcelain)" || { echo 'resolving the approved runtime dirtied the checkout' >&2; exit 1; }
 
       - name: Bind this round to one exact seed identity
         env:
@@ -285,20 +301,62 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/release-evidence"
-          node scripts/corpus-reconcile.mjs \
-            --root "$GITHUB_WORKSPACE" \
-            --seed-archive "$RUNNER_TEMP/corpus-seed-download/ruvnet-brain.zip" \
-            --seed-tag "$SEED_TAG" \
-            --seed-sha256 "$SEED_SHA256" \
-            --allow-pinned-seed-tag \
-            --assets "$RUNNER_TEMP/corpus-assets" \
-            --workspace "$RUNNER_TEMP/corpus-clones" \
-            --coverage "$GITHUB_WORKSPACE/data/source-coverage.json" \
-            --candidate-out "$RUNNER_TEMP/corpus-candidate/ruvnet-brain" \
-            --receipt-out "$GITHUB_WORKSPACE/release-evidence/corpus-receipt.json" \
-            --accuracy-oracle "$GITHUB_WORKSPACE/data/retrieval-accuracy-oracle.json" \
-            --builder-sha "$EXPECTED_SHA" \
-            --owner ruvnet | tee "$GITHUB_WORKSPACE/release-evidence/corpus-reconcile.log"
+          # ADR-0091 D2: C3 is a non-blocking diagnostic whose readers check binding, not completeness,
+          # yet the full run (~1,164 queries x ~4.2 s) cost 82 minutes here. --accuracy-sample 80
+          # measures a deterministic 80-question sample in both modes (160 queries, ~11-12 min). It
+          # must equal C3_DIAGNOSTIC_SAMPLE_QUESTIONS in scripts/oracle/retrieval-accuracy.mjs (a unit
+          # test pins them). Full audit on demand: scripts/oracle/retrieval-accuracy.mjs with no sample flag.
+          reconcile() { # <seed archive> -- the exit status is corpus-reconcile's own, not tee's
+            node scripts/corpus-reconcile.mjs \
+              --root "$GITHUB_WORKSPACE" \
+              --seed-archive "$1" \
+              --seed-tag "$SEED_TAG" \
+              --seed-sha256 "$SEED_SHA256" \
+              --allow-pinned-seed-tag \
+              --assets "$RUNNER_TEMP/corpus-assets" \
+              --workspace "$RUNNER_TEMP/corpus-clones" \
+              --coverage "$GITHUB_WORKSPACE/data/source-coverage.json" \
+              --candidate-out "$RUNNER_TEMP/corpus-candidate/ruvnet-brain" \
+              --receipt-out "$GITHUB_WORKSPACE/release-evidence/corpus-receipt.json" \
+              --accuracy-oracle "$GITHUB_WORKSPACE/data/retrieval-accuracy-oracle.json" \
+              --accuracy-sample 80 \
+              --builder-sha "$EXPECTED_SHA" \
+              --owner ruvnet | tee -a "$GITHUB_WORKSPACE/release-evidence/corpus-reconcile.log"
+            return "${PIPESTATUS[0]}"
+          }
+          # BEGIN seed-ledger-fallback (ADR-0091 D4; executed by tests/unit/corpus-seed-ledger-fallback.test.mjs)
+          # corpus-next-seed judged this seed's receipt and recall report before download, but its
+          # generation ledger lives only inside the archive. corpus-reconcile.mjs checks the ledger schema
+          # right after extraction and, if this runtime cannot consume it, exits 3 having moved nothing.
+          # That is a code-release event, not a broken night: re-run seed extraction ONCE from the
+          # committed bootstrap, in this job, loudly. A bootstrap that is itself unconsumable fails.
+          status=0
+          reconcile "$RUNNER_TEMP/corpus-seed-download/ruvnet-brain.zip" || status=$?
+          if [ "$status" = 3 ] && [ "$SEED_ORIGIN" != committed-bootstrap ]; then
+            echo "::warning title=Corpus seed fallback::seed $SEED_TAG has a generation ledger this runtime cannot read; re-running once from the committed bootstrap seed (ADR-0091 D4)"
+            SEED_TAG="$(node -p "require('./data/corpus-seed.json').tag")"
+            SEED_SHA256="$(node -p "require('./data/corpus-seed.json').sha256")"
+            SEED_BYTES="$(node -p "require('./data/corpus-seed.json').bytes")"
+            SEED_ORIGIN=committed-bootstrap-after-ledger-fallback
+            case "$SEED_TAG" in corpus-sha256-*) echo 'the committed bootstrap must be the pre-contract pinned seed' >&2; exit 1 ;; esac
+            mkdir -p "$RUNNER_TEMP/corpus-bootstrap-download"
+            gh release download "$SEED_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'ruvnet-brain.zip' --dir "$RUNNER_TEMP/corpus-bootstrap-download"
+            printf '%s  %s\n' "$SEED_SHA256" "$RUNNER_TEMP/corpus-bootstrap-download/ruvnet-brain.zip" | sha256sum --check --strict
+            test "$(stat -c %s "$RUNNER_TEMP/corpus-bootstrap-download/ruvnet-brain.zip")" = "$SEED_BYTES"
+            # Every later step (the seal, the no-change comparison) must name the seed actually used.
+            {
+              echo "SEED_TAG=$SEED_TAG"
+              echo "SEED_SHA256=$SEED_SHA256"
+              echo "SEED_BYTES=$SEED_BYTES"
+              echo "SEED_ORIGIN=$SEED_ORIGIN"
+            } >> "$GITHUB_ENV"
+            export SEED_TAG SEED_SHA256 SEED_BYTES SEED_ORIGIN
+            status=0
+            reconcile "$RUNNER_TEMP/corpus-bootstrap-download/ruvnet-brain.zip" || status=$?
+          fi
+          exit "$status"
+          # END seed-ledger-fallback
 
       - name: Record exact prepared identities
         id: seal
