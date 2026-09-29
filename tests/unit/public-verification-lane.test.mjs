@@ -60,7 +60,9 @@ function plan(releaseCoverage) {
     denominator: { eligibleStores: ['new', 'old'], eligibleStoreSetSha256: digest(['new', 'old']),
       deltaStores: ['new'], deltaStoreSetSha256: digest(['new']),
       legacyPopulationStores: ['old'], legacyPopulationStoreSetSha256: digest(['old']),
-      legacySelectedStores: ['old'], legacySelectedStoreSetSha256: digest(['old']) },
+      legacySelectedStores: ['old'], legacySelectedStoreSetSha256: digest(['old']),
+    retiredFixtureStores: [], retiredFixtureStoreSetSha256: digest([]),
+    unfixturedEligibleStores: [], unfixturedEligibleStoreSetSha256: digest([]), unfixturedEligibleCount: 0 },
     oracle: {},
     cohorts: { delta: 1, legacy: 1 }, k: 10,
     cases: [
