@@ -16,7 +16,7 @@ on:
           - code
           - corpus
       candidate_sha:
-        description: Full 40-character SHA currently at origin/main
+        description: Full 40-character SHA currently at origin/main (corpus mode — also the newest install-verified code release's source)
         required: true
         type: string
       version:
@@ -576,13 +576,14 @@ jobs:
     name: authorize-corpus-generation
     if: inputs.mode == 'corpus'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20 # downloads the ~555 MB approved release archive to rebuild its pin
     permissions:
       actions: read
       contents: read
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       version: ${{ steps.candidate.outputs.version }}
+      approved_tag: ${{ steps.approved.outputs.approved_tag }}
       seed_tag: ${{ steps.seed.outputs.seed_tag }}
       seed_sha256: ${{ steps.seed.outputs.seed_sha256 }}
       seed_bytes: ${{ steps.seed.outputs.seed_bytes }}
@@ -605,24 +606,47 @@ jobs:
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git fetch --no-tags origin main
+          # EXACT equality, never "an ancestor of GITHUB_SHA" (independent review of ADR-0091 D3,
+          # 2026-09-28): an ancestor let the unattended job promote an OLDER runtime over the live
+          # code release. The corpus is built at protected main HEAD, which must itself be the newest
+          # install-verified release (the next step proves that).
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"
           test "$(node -p "require('./package.json').version")" = "$EXPECTED_VERSION"
           test -z "$(git status --porcelain)"
           printf 'candidate_sha=%s\nversion=%s\n' "$EXPECTED_SHA" "$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
-      - name: Require an owner-approved shipped runtime before any unattended promotion
+      - id: approved
+        name: Resolve the approved runtime from the newest install-verified code release
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! -s data/approved-runtime.json ]]; then
-            echo '::error::data/approved-runtime.json is missing. Unattended corpus promotion ships the archive'\''s'
-            echo '::error::executable surface (the forge-* module graph, package manifests, verify-bundle.mjs, the'
-            echo '::error::signing trust root) straight into every installed client, so it is refused until an'
-            echo '::error::owner-gated code release pins that runtime: node scripts/approved-runtime.mjs --emit'
-            echo '::error::--archive-manifest <ARCHIVE-MANIFEST.json> --code-sha <sha> --out data/approved-runtime.json'
+          # ADR-0091 D3. Unattended corpus promotion ships the archive's executable surface (the forge-*
+          # module graph, package manifests, verify-bundle.mjs, the signing trust root) straight into
+          # every installed client, so it runs only on a runtime an owner-gated code release shipped AND
+          # install-verified on all three OSes. That approval is no longer a committed file (a committed
+          # pin could never match the release that committed it). It is RESOLVED here: the newest
+          # vX.Y.Z — only the newest; it never falls back to an older one — whose signed
+          # public-verification-aggregate.json verifies against the committed
+          # keys/ruvnet-brain-signing.pub.pem, whose bundleSha256 is that release's exact zip, and whose
+          # sourceSha is reachable from origin/main. The pin is rebuilt from that zip's own
+          # ARCHIVE-MANIFEST.json and never written into the checkout.
+          node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY" \
+            --out "$RUNNER_TEMP/approved-runtime.json" > "$RUNNER_TEMP/approved-release.json"
+          approved_sha="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').sourceSha")"
+          approved_tag="$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').tag")"
+          # The approved source must BE this run's candidate, which the step above bound to GITHUB_SHA
+          # and origin/main exactly. The publisher (release.mjs) re-requires target == GITHUB_SHA.
+          if [[ "$approved_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::main HEAD $EXPECTED_SHA is not the approved runtime: the newest code release is $approved_tag @ $approved_sha."
+            echo '::error::The corpus is only ever built at main HEAD when main HEAD IS the newest install-verified release.'
             exit 1
           fi
+          test "$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').version")" = "$EXPECTED_VERSION"
+          echo "approved_tag=$approved_tag" >> "$GITHUB_OUTPUT"
+          echo "::notice::approved runtime $approved_tag @ $approved_sha (resolved from its signed install verification)"
       - id: seed
         name: Resolve the previous compatible verified generation as this round's seed
         env:
@@ -630,7 +654,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/corpus-next-seed.mjs --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/next-seed.json"
+          # ADR-0091 D4: the seed is the newest COMPATIBLE generation, judged before its archive is
+          # downloaded -- per-store embedding model/dimensions from the receipt, and the detached
+          # .recall.json against the frozen fixture digest and repo-recall reader. Compatibility is
+          # judged by the runtime that will CONSUME the seed: corpus-prepare builds at the approved
+          # runtime's source (EXPECTED_SHA, usually older than main), so its readers and fixture are
+          # the ones loaded here. No runtime pin takes part in seed selection any more.
+          approved_source="$RUNNER_TEMP/approved-source"
+          git worktree add --detach "$approved_source" "$EXPECTED_SHA"
+          node scripts/corpus-next-seed.mjs --repo "$GITHUB_REPOSITORY" \
+            --runtime-root "$approved_source" --out "$RUNNER_TEMP/next-seed.json"
+          git worktree remove --force "$approved_source"
           {
             echo "seed_tag=$(node -p "require(process.env.RUNNER_TEMP + '/next-seed.json').tag")"
             echo "seed_sha256=$(node -p "require(process.env.RUNNER_TEMP + '/next-seed.json').sha256")"
@@ -796,13 +830,19 @@ jobs:
           test -z "$(git status --porcelain)"
       - name: Re-verify the exact candidate identity, contents and shipped runtime
         env:
+          GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.corpus-identity.outputs.candidate_sha }}
+          APPROVED_TAG: ${{ needs.corpus-identity.outputs.approved_tag }}
           EXPECTED_ARCHIVE_SHA256: ${{ needs.corpus-prepare.outputs.archive_sha256 }}
           EXPECTED_RECEIPT_SHA256: ${{ needs.corpus-prepare.outputs.receipt_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
           staged="$RUNNER_TEMP/corpus-import"
+          # The code that verifies, signs and publishes is THIS run's own protected-main commit, never an
+          # older one: corpus-identity bound the candidate to GITHUB_SHA exactly.
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -s "$staged/ruvnet-brain.zip"
           test -s "$staged/corpus-receipt.json"
           test -s "$staged/corpus-preparation.identity"
@@ -818,12 +858,17 @@ jobs:
           node scripts/corpus-candidate.mjs --verify \
             --bundle "$staged/ruvnet-brain.zip" \
             --receipt "$staged/corpus-receipt.json"
-          # RUNTIME BYTES. The corpus was built at main HEAD; its executable surface must still be the
-          # owner-approved shipped code artifact, byte for byte, separately from builderSourceSha.
+          # RUNTIME BYTES. Independently re-resolve the pin for EXACTLY the release corpus-identity approved
+          # (its signed aggregate re-verified on this runner, not handed over as a job output), require it
+          # to name this candidate, then require the archive's executable surface to equal it byte for byte.
+          node scripts/approved-runtime.mjs --resolve --repo "$GITHUB_REPOSITORY" --tag "$APPROVED_TAG" \
+            --out "$RUNNER_TEMP/approved-runtime.json" > "$RUNNER_TEMP/approved-release.json"
+          test "$(node -p "require(process.env.RUNNER_TEMP + '/approved-release.json').sourceSha")" = "$CANDIDATE_SHA"
           manifest_entry="$(unzip -Z1 "$staged/ruvnet-brain.zip" | grep -E '(^|/)ARCHIVE-MANIFEST\.json$' | head -1)"
           test -n "$manifest_entry"
           unzip -p "$staged/ruvnet-brain.zip" "$manifest_entry" > "$RUNNER_TEMP/archive-manifest.json"
-          node scripts/approved-runtime.mjs --verify --archive-manifest "$RUNNER_TEMP/archive-manifest.json"
+          node scripts/approved-runtime.mjs --verify --archive-manifest "$RUNNER_TEMP/archive-manifest.json" \
+            --pin "$RUNNER_TEMP/approved-runtime.json"
           test -z "$(git status --porcelain)"
       - name: Sign the exact archive with the corpus-scoped key
         env:
@@ -879,6 +924,8 @@ jobs:
             ${{ runner.temp }}/corpus-import/corpus-preparation.identity
             ${{ runner.temp }}/corpus-import/ruvnet-brain.zip.sha256
             ${{ runner.temp }}/archive-manifest.json
+            ${{ runner.temp }}/approved-runtime.json
+            ${{ runner.temp }}/approved-release.json
           if-no-files-found: warn
           retention-days: 90
 

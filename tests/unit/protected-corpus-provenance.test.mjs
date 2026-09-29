@@ -7,6 +7,8 @@ import vm from 'node:vm';
 // No shell, no credentials, no network — and no second copy of the guard to drift from the real one.
 const workflow = fs.readFileSync(new URL('../../.github/workflows/protected-release.yml', import.meta.url), 'utf8');
 const sha = 'c'.repeat(40);
+// Independent review of ADR-0091 D3 (2026-09-28): the run's head IS the corpus source (exact equality
+// with GITHUB_SHA restored), so ONE identity binds both the run and the artifact.
 const repo = 'stuinfla/ruvnet-brain';
 const workflowPath = '.github/workflows/protected-release.yml';
 const RUN_ID = 4242;
@@ -99,6 +101,10 @@ describe('protected corpus preparation artifact provenance (ADR-086 steps 9 + 17
     // ── wrong SHA / ref ──────────────────────────────────────────────────────────────────────
     ['wrong candidate source SHA', (f) => { f.run.head_sha = 'd'.repeat(40); }],
     ['malformed candidate source SHA input', (f) => { f.env.CANDIDATE_SHA = 'not-a-sha'; }],
+    ['artifact prepared for a different corpus source', (f) => {
+      f.artifacts[0].name = `corpus-seed-prepared-${'d'.repeat(40)}`;
+      f.env.PREPARATION_ARTIFACT = f.artifacts[0].name;
+    }],
     ['unprotected ref', (f) => { f.run.head_branch = 'feature/forgery'; }],
     // ── wrong repository ─────────────────────────────────────────────────────────────────────
     ['foreign repository', (f) => { f.run.repository.full_name = 'attacker/brain'; }],
