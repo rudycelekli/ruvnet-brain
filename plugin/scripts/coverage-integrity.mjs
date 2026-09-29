@@ -225,6 +225,41 @@ export function generationLedgerBytes(ledger) {
   return Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`);
 }
 
+const isIsoOrNull = (value) => value === null || (typeof value === 'string' && Number.isFinite(Date.parse(value)));
+const isAttemptCount = (value) => Number.isSafeInteger(value) && value >= 1;
+
+/**
+ * ADR-0091 D5: how an ELIGIBLE repository row stands in a bundle. It returns
+ *   'shipped' — the store's bytes ship: CURRENT, or STALE with a verified `carry` record (the refresh
+ *               failed and the previous generation's bytes, re-hashed against the ledger, were kept);
+ *   'absent'  — MISSING with a `failure` record: a store that failed with no prior bytes, excluded
+ *               from the repository store set;
+ *   null      — anything else. A STALE/MISSING row WITHOUT its record, FAILED and UNVERIFIED stay
+ *               rejected, exactly as before.
+ * The status token is never new: the distinction lives in the object (0.1.0's STALE_CARRIED and
+ * PENDING_FAILED were withdrawn).
+ */
+export function eligibleRepositoryStanding(row) {
+  const status = row?.status;
+  const { carry, failure } = row || {};
+  if (status === 'CURRENT') return carry === undefined && failure === undefined ? 'shipped' : null;
+  if (status === 'STALE' && carry && typeof carry === 'object' && failure === undefined) {
+    const carried = String(carry.carriedSourceCommit || '').toLowerCase();
+    const shipped = typeof carry.reason === 'string' && carry.reason.length > 0
+      && HEX40.test(carried) && carried === String(row.artifact?.sourceCommit || '').toLowerCase()
+      && HEX40.test(String(carry.missedUpstream || '').toLowerCase())
+      && String(carry.missedUpstream).toLowerCase() === String(row.upstream?.sha || '').toLowerCase()
+      && carried !== String(carry.missedUpstream).toLowerCase()
+      && isAttemptCount(carry.attempts) && isIsoOrNull(carry.carriedCommittedAt)
+      && row.artifact?.bytesVerified === true && row.artifact?.passagesPresent === true;
+    return shipped ? 'shipped' : null;
+  }
+  if (status === 'MISSING' && failure && typeof failure === 'object' && carry === undefined) {
+    return typeof failure.reason === 'string' && failure.reason.length > 0 && isAttemptCount(failure.attempts) ? 'absent' : null;
+  }
+  return null;
+}
+
 export function validatePublicInventory({ assetsDir, coverage, ledger, installedPublicStores = null, gistReceipt = null }) {
   const root = path.resolve(assetsDir);
   const selected = installedPublicStores === null ? null : [...installedPublicStores].map((store) => String(store).toLowerCase());
@@ -248,11 +283,23 @@ export function validatePublicInventory({ assetsDir, coverage, ledger, installed
     if (stores.some((store) => !store) || new Set(stores).size !== stores.length) throw new Error(`${family} stores are missing or duplicated`);
     return stores.sort();
   };
-  const repos = coverage.rows.filter((row) => row.kind === 'repository' && row.disposition === 'eligible');
-  if (repos.some((row) => row.status !== 'CURRENT')) throw new Error('an eligible repository is not CURRENT');
+  const eligibleRepos = coverage.rows.filter((row) => row.kind === 'repository' && row.disposition === 'eligible');
+  const rejected = eligibleRepos.find((row) => eligibleRepositoryStanding(row) === null);
+  if (rejected) {
+    throw new Error(`an eligible repository is not CURRENT (${rejected.artifact?.store || rejected.name}: ${rejected.status} `
+      + 'without a verified carry/failure record)');
+  }
+  const repos = eligibleRepos.filter((row) => eligibleRepositoryStanding(row) === 'shipped');
   const repositories = uniqueStores(repos, 'repository');
+  // A MISSING-with-failure store ships no bytes: it is in neither the repository set nor the excluded
+  // set, so a stray file under its name still fails below as an unclassified public store.
+  const absentRepositories = uniqueStores(eligibleRepos.filter((row) => eligibleRepositoryStanding(row) === 'absent'),
+    'absent repository');
   const excludedRepositories = uniqueStores(coverage.rows.filter((row) => row.kind === 'repository'
     && row.disposition !== 'eligible'), 'excluded repository');
+  if (absentRepositories.some((store) => repositories.includes(store) || excludedRepositories.includes(store))) {
+    throw new Error('an absent repository store is also shipped or excluded');
+  }
   const excludedSet = new Set(excludedRepositories);
   if (repositories.some((store) => excludedSet.has(store))) throw new Error('eligible and excluded repository stores overlap');
   const gists = coverage.rows.filter((row) => row.kind === 'gist' && row.disposition === 'eligible');
@@ -337,6 +384,15 @@ export function validatePublicInventory({ assetsDir, coverage, ledger, installed
       || (generation.sourceCommit !== null && !/^[a-f0-9]{7,64}$/i.test(String(generation.sourceCommit || '')))
       || typeof generation.builtUtc !== 'string' || !Number.isFinite(Date.parse(generation.builtUtc))) {
       throw new Error(`${store} generation record provenance is incomplete`);
+    }
+  }
+  // A carried store ships the PREVIOUS generation's bytes: the ledger must name exactly the commit
+  // the carry record says was kept, or the row describes bytes this bundle does not carry.
+  for (const row of repos) {
+    if (!row.carry) continue;
+    const store = String(row.artifact.store).toLowerCase();
+    if (String(ledger.stores[store]?.sourceCommit || '').toLowerCase() !== String(row.carry.carriedSourceCommit).toLowerCase()) {
+      throw new Error(`${store} carry record names a source commit the generation ledger does not carry`);
     }
   }
   const publicStores = expected;

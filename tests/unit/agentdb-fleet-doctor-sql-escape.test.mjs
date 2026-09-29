@@ -33,7 +33,7 @@ describe('agentdb-fleet-doctor: namespace SQL is escaped against a quote in the 
       execFileSync('sqlite3', [db, `INSERT INTO memory_entries VALUES ('${escaped}', 'k1');`]);
 
       const escapedResult = sql(db, `SELECT count(*) FROM memory_entries WHERE namespace='${escaped}';`);
-      expect(escapedResult).toBe('1');
+      expect(escapedResult).toBe('1'); // sync-version-ignore: a sqlite row count, not a version
 
       // Sabotage check: the OLD, unescaped form must fail to even execute as valid SQL against
       // this exact quoted value -- proving the escaping is load-bearing, not decorative.

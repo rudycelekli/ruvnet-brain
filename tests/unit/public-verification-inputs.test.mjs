@@ -12,6 +12,7 @@ import {
 } from '../../scripts/coverage-integrity.mjs';
 import { sealRetrievalQueryEvidence } from '../../scripts/retrieval-canary.mjs';
 import {
+  baselineTagMatches,
   createPublicVerificationInputs,
   createObservedBaselineReceipt,
   createReceiptedBaselineVerification,
@@ -518,5 +519,35 @@ describe('createReceiptedBaselineVerification — the new seed-type path (task 3
       baselineReceipt: receiptFile,
       outFile: path.join(root, 'baseline-verification-receipt.json'),
     })).rejects.toThrow(/seed bundle sha256/i);
+  });
+});
+
+// ADR-0091 D6.3: a code release built from a corpus generation observes that generation as its
+// baseline, and a generation's published tag is corpus-sha256-<its own archive digest> -- a tag no
+// file inside the archive can contain (its ledger names the runtime that built it, e.g. vX.Y.Z).
+describe('observed baseline against the seed\'s own published tag (ADR-0091 D6.3)', () => {
+  it('accepts a content-addressed generation tag by the archive digest it names, not by the internal ledger tag', async () => {
+    const f = fixture();
+    const { sha256, bytes } = fileId(f.baselineBundle);
+    const result = await createObservedBaselineReceipt({ baselineBundle: f.baselineBundle,
+      outFile: path.join(f.root, 'generation-observed.json'), expectedTag: `corpus-sha256-${sha256}`,
+      expectedSha256: sha256, expectedBytes: bytes });
+    expect(result.receipt.archive.sha256).toBe(sha256);
+    expect(result.receipt.releaseTag).toBe(FAILED_SEED_TAG); // the internal ledger tag is recorded, never compared
+  });
+
+  it('RED: a generation tag that names another archive digest is refused', async () => {
+    const f = fixture();
+    const { sha256, bytes } = fileId(f.baselineBundle);
+    await expect(createObservedBaselineReceipt({ baselineBundle: f.baselineBundle,
+      outFile: path.join(f.root, 'mis-tagged.json'), expectedTag: `corpus-sha256-${'0'.repeat(64)}`,
+      expectedSha256: sha256, expectedBytes: bytes })).rejects.toThrow(/expected public release tag/);
+  });
+
+  it('keeps the exact ledger-tag equality for a code-release (vX.Y.Z) seed', () => {
+    expect(baselineTagMatches({ publishedTag: 'v4.3.26', ledgerReleaseTag: 'v4.3.26', archiveSha256: 'a'.repeat(64) })).toBe(true); // sync-version-ignore: bootstrap tag
+    expect(baselineTagMatches({ publishedTag: 'v4.3.26', ledgerReleaseTag: 'v4.3.27', archiveSha256: 'a'.repeat(64) })).toBe(false); // sync-version-ignore: bootstrap tag
+    expect(baselineTagMatches({ publishedTag: `corpus-sha256-${'a'.repeat(64)}`, ledgerReleaseTag: 'v4.3.26', archiveSha256: 'a'.repeat(64) })).toBe(true); // sync-version-ignore: bootstrap tag
+    expect(baselineTagMatches({ publishedTag: `corpus-sha256-${'a'.repeat(64)}`, ledgerReleaseTag: `corpus-sha256-${'a'.repeat(64)}`, archiveSha256: 'b'.repeat(64) })).toBe(false);
   });
 });

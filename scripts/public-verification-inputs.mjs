@@ -250,6 +250,19 @@ function retrospectiveBaselineFromTree({ extractedRoot, bundleFile, expectedTag,
   return { receipt, bytes, fileSha256: crypto.createHash('sha256').update(bytes).digest('hex'), root, archiveManifest };
 }
 
+/**
+ * ADR-0091 D6.3: does the baseline archive carry the seed's own published tag? A code-release seed
+ * (vX.Y.Z) records that tag in its generation ledger. A corpus-generation seed CANNOT: its tag is
+ * corpus-sha256-<the archive's own digest>, which no file inside the archive can contain, and its
+ * ledger names the runtime that built it. So a content-addressed tag is proven by the archive digest
+ * it names; every other tag must equal the ledger's releaseTag, exactly as before.
+ */
+export function baselineTagMatches({ publishedTag, ledgerReleaseTag, archiveSha256 }) {
+  const contentAddressed = /^corpus-sha256-([0-9a-f]{64})$/.exec(String(publishedTag || ''));
+  if (contentAddressed) return contentAddressed[1] === archiveSha256;
+  return typeof publishedTag === 'string' && publishedTag.length > 0 && ledgerReleaseTag === publishedTag;
+}
+
 function observedBaselineFromTree({ extractedRoot, bundleFile, expectedTag, expectedSha256, expectedBytes }) {
   const ledgerFile = findNamed(extractedRoot, 'RVF-GENERATIONS.json');
   const root = path.dirname(ledgerFile);
@@ -259,7 +272,9 @@ function observedBaselineFromTree({ extractedRoot, bundleFile, expectedTag, expe
     fail('historical baseline generation ledger is malformed');
   }
   const archive = namedIdentity(bundleFile);
-  if (ledger.releaseTag !== expectedTag) fail('historical baseline differs from the expected public release tag');
+  if (!baselineTagMatches({ publishedTag: expectedTag, ledgerReleaseTag: ledger.releaseTag, archiveSha256: archive.sha256 })) {
+    fail('historical baseline differs from the expected public release tag');
+  }
   if (!HEX64.test(String(expectedSha256 || '')) || archive.sha256 !== expectedSha256) {
     fail('historical baseline differs from the expected public archive SHA-256');
   }
@@ -476,7 +491,8 @@ export async function createPublicVerificationInputs({ baselineBundle, candidate
         fail('baseline archive bytes differ from release coverage');
       }
       if (seed.receiptSha256 !== baselineProof.fileSha256) fail('baseline receipt differs from release coverage');
-      if (seed.tag !== baselineProof.receipt.releaseTag) {
+      if (!baselineTagMatches({ publishedTag: seed.tag, ledgerReleaseTag: baselineProof.receipt.releaseTag,
+        archiveSha256: baselineProof.receipt.archive.sha256 })) {
         fail('baseline release tag differs from release coverage');
       }
       const baselineStores = baselineProof.receipt.stores.map(({ name }) => name);
