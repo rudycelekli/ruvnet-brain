@@ -25,6 +25,7 @@ import {
 } from './incremental-refresh.mjs';
 import { chooseModelCache, loadRvf, loadTransformers } from './resolve-deps.mjs';
 import { getVersion, getVersionTag } from '../scripts/version.mjs';
+import { CORPUS_QA_FAILED_EXIT } from '../scripts/corpus-store-failure.mjs';
 import { RVF_GENERATIONS_FILE, writeRvfGeneration, readRvfGenerations, projectSourceStore } from '../scripts/rvf-generation.mjs';
 const BGE = {
   model: 'Xenova/bge-base-en-v1.5',
@@ -236,7 +237,13 @@ function removeLegacyDuplicates() {
 async function qaCandidate() {
   const qaArgs = ['../scripts/corpus-qa.mjs', '--dir', candidate, '--store', NAME];
   if (STRUCTURAL_ONLY) qaArgs.push('--structural');
-  run(qaArgs.shift(), qaArgs);
+  try {
+    run(qaArgs.shift(), qaArgs);
+  } catch (error) {
+    // ADR-0091 D5: a QA refusal is reported by EXIT STATUS, not log text, so corpus-reconcile can tell
+    // it from a transient failure and never retry it (the round-trip sample is deterministic).
+    throw Object.assign(new Error(`corpus-qa refused the ${NAME} candidate (${error.message})`), { code: 'CORPUS_QA_FAILED' });
+  }
 }
 
 function stampCandidateGeneration() {
@@ -393,6 +400,10 @@ try {
     await incrementalRefresh(corpus, previousMeta, currentLedger);
   }
   console.log(`[refresh] complete: ${NAME}`);
+} catch (error) {
+  if (error?.code !== 'CORPUS_QA_FAILED') throw error;
+  console.error(`[refresh] ${error.message}`);
+  process.exitCode = CORPUS_QA_FAILED_EXIT;
 } finally {
   fs.rmSync(candidate, { recursive: true, force: true });
 }

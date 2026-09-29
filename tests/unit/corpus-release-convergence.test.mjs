@@ -28,8 +28,12 @@ describe('corpus and release convergence wiring', () => {
       const seedWorkflow = fs.readFileSync(path.join(root, '.github/workflows/corpus-seed.yml'), 'utf8');
       expect(seedWorkflow).toContain('--allow-pinned-seed-tag');
     }
+    // ADR-0091 D6: CI no longer reads the committed descriptor directly. It resolves the seed through
+    // corpus-next-seed.mjs, which reads data/corpus-seed.json as its bootstrap/recovery input, and
+    // still digest-checks whatever it downloads (tests/unit/ci-corpus-seed-consumers.test.mjs).
     const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
-    expect(workflow).toContain('data/corpus-seed.json');
+    expect(workflow).toContain('node scripts/corpus-next-seed.mjs --repo "$GITHUB_REPOSITORY" --require-coverage');
+    expect(fs.readFileSync(path.join(root, 'scripts/corpus-next-seed.mjs'), 'utf8')).toContain("'data/corpus-seed.json'");
     expect(workflow).toContain('SEED_SHA256');
     expect(workflow).not.toMatch(/gh release download --repo[^\n]+--pattern ruvnet-brain\.zip/);
   });

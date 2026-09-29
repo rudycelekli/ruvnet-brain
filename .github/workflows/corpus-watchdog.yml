@@ -1,0 +1,68 @@
+name: corpus-watchdog
+
+# WHY (2026-09-29 nightly corpus redesign). The nightly dispatcher stood down in ~13 seconds and
+# finished GREEN night after night while CORPUS_NIGHTLY was unset: nothing was built or published,
+# and nothing paged, because ntfy-alerts only pages on red. A green scheduler is not a refreshed
+# corpus. This job asks for EVIDENCE OF AN OUTCOME instead (scripts/corpus-watchdog.mjs):
+# a night that ended published or no-change within 48h, tonight's corpus run not failed, the newest
+# code release's aggregate verified within 24h, and no store deferred for more than 7 days.
+#
+# 17:17 UTC = ten hours after the 07:17 dispatch, past the preparation budget, so "tonight" has had
+# time to finish. It runs on a genuine `schedule:`, so its red conclusion fires ntfy-alerts.yml's
+# workflow_run listener (it is on that watch list) — exit 1 on RED is the entire paging mechanism.
+#
+# Read-only by construction: `contents: read` + `actions: read`, the automatic token only, NO
+# secrets, no environment, no id-token. It lists runs and releases and downloads small public
+# assets; it cannot dispatch, sign, or publish anything.
+on:
+  schedule:
+    - cron: '17 17 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: corpus-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: judge-corpus-health
+    # Forks inherit schedules; they have no corpus history and must not page anyone.
+    if: github.repository == 'stuinfla/ruvnet-brain'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Judge the corpus from run and release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          node scripts/corpus-watchdog.mjs --repo "$GITHUB_REPOSITORY" 2>&1 | tee "$RUNNER_TEMP/watchdog.out" || status=$?
+          {
+            echo "### corpus-watchdog — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ''
+            echo '```'
+            cat "$RUNNER_TEMP/watchdog.out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q '^corpus-watchdog WARNING' "$RUNNER_TEMP/watchdog.out"; then
+            echo '::warning title=corpus-watchdog::The corpus nightly is degraded or superseded — see the step summary.'
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo '::error title=corpus-watchdog::The customer corpus is not being refreshed (RED) — see the step summary.'
+          fi
+          exit "$status"
