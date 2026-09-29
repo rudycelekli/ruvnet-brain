@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "source": "Captured verbatim from `gh release view --json` and `gh release list --json` (no field argument prints the accepted field list).",
+  "ghVersion": "2.101.0 (2026-09-15)",
+  "capturedAt": "2026-09-29",
+  "release view": [
+    "apiUrl",
+    "assets",
+    "author",
+    "body",
+    "createdAt",
+    "databaseId",
+    "id",
+    "isDraft",
+    "isImmutable",
+    "isPrerelease",
+    "name",
+    "publishedAt",
+    "tagName",
+    "tarballUrl",
+    "targetCommitish",
+    "uploadUrl",
+    "url",
+    "zipballUrl"
+  ],
+  "release list": [
+    "createdAt",
+    "isDraft",
+    "isImmutable",
+    "isLatest",
+    "isPrerelease",
+    "name",
+    "publishedAt",
+    "tagName"
+  ]
+}

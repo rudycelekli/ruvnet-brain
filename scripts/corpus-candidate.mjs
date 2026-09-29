@@ -124,7 +124,7 @@ function normalizeBootstrapIdentity(bootstrapIdentity) {
 // from bundleFile, or is one of the three inputs that are not archive-derived (builderSourceSha,
 // bootstrapIdentity, createdAt) — verification supplies those from the receipt being checked, so a
 // receipt can never claim archive contents that were not really shipped.
-async function deriveCorpusCandidate({ bundleFile, builderSourceSha, bootstrapIdentity, createdAt, accuracyReportFile, recallReportFile }) {
+async function deriveCorpusCandidate({ bundleFile, builderSourceSha, bootstrapIdentity, createdAt, accuracyReportFile, recallReportFile, coverageFile = null }) {
   const bundle = path.resolve(bundleFile || '');
   if (!fs.existsSync(bundle) || !fs.statSync(bundle).isFile()) fail(`bundle missing (${bundle || 'no path supplied'})`);
   if (!HEX_SOURCE.test(builderSourceSha || '')) fail('builderSourceSha must be a 40-64 hex source identity');
@@ -145,10 +145,16 @@ async function deriveCorpusCandidate({ bundleFile, builderSourceSha, bootstrapId
   // a DECLARED REDUCTION in release requirements, not a demonstration that C3 passed — so the C3
   // report is still required to exist and still bound to these exact archive bytes, and is published
   // alongside rather than quietly dropped.
+  // ADR-0091 D7.3: a report that claims retired questions is only accepted against this candidate's
+  // sealed coverage (the archive carries none, and the schema-3 receipt binds none), recomputed here
+  // from those bytes. With no coverage supplied, any claimed retirement is rejected.
+  const fixture = loadFixture();
   const recall = readRecallReport({
     reportFile: recallReportFile || `${bundle}.recall.json`,
     archive,
-    expectedFixtureSha256: loadFixture().fixtureSha256,
+    expectedFixtureSha256: fixture.fixtureSha256,
+    coverageBytes: coverageFile ? fs.readFileSync(path.resolve(coverageFile)) : null,
+    fixtureStores: fixture.questions.map((question) => question.store),
   });
   const accuracyDiagnostic = readDiagnosticAccuracyReport({
     reportFile: accuracyReportFile || `${bundle}.accuracy.json`,
@@ -418,6 +424,7 @@ function currentGitSha() {
 
 export async function createCorpusReceipt({
   bundleFile, builderSourceSha, bootstrapIdentity = null, receiptFile, createdAt, accuracyReportFile = null, recallReportFile = null,
+  coverageFile = null,
 } = {}) {
   const resolvedReceiptFile = path.resolve(receiptFile || 'dist/corpus-receipt.json');
   const receipt = await deriveCorpusCandidate({
@@ -427,6 +434,7 @@ export async function createCorpusReceipt({
     createdAt: createdAt || new Date().toISOString(),
     accuracyReportFile,
     recallReportFile,
+    coverageFile,
   });
   fs.mkdirSync(path.dirname(resolvedReceiptFile), { recursive: true });
   fs.writeFileSync(resolvedReceiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
@@ -435,6 +443,7 @@ export async function createCorpusReceipt({
 
 export async function verifyCorpusReceipt({
   bundleFile, receiptFile, expectedBuilderSha, expectedArchiveSha256, expectedReceiptSha256, accuracyReportFile = null, recallReportFile = null,
+  coverageFile = null,
 } = {}) {
   const resolvedReceiptFile = path.resolve(receiptFile || '');
   const resolvedBundleFile = path.resolve(bundleFile || '');
@@ -465,6 +474,7 @@ export async function verifyCorpusReceipt({
     createdAt: receipt.createdAt,
     accuracyReportFile,
     recallReportFile,
+    coverageFile,
   });
   if (canonicalJson(derived) !== canonicalJson(receipt)) fail('receipt does not match the exact corpus archive contents');
   return receipt;
@@ -474,7 +484,9 @@ export async function verifyCorpusReceipt({
 // (corpus-sha256-<digest>) and its accompanying schema-2 candidate receipt. This never compares
 // the external tag against the archive's own internal ARCHIVE-MANIFEST releaseTag/version — those
 // are two independent identity domains and conflating them was the historical bug this fixes.
-export async function verifySeedBaseline({ seedDescriptor, bundleFile, receiptFile, accuracyReportFile = null, recallReportFile = null } = {}) {
+export async function verifySeedBaseline({
+  seedDescriptor, bundleFile, receiptFile, accuracyReportFile = null, recallReportFile = null, coverageFile = null,
+} = {}) {
   if (!seedDescriptor || typeof seedDescriptor !== 'object') fail('seed descriptor is required');
   const { tag, sha256, bytes, sourceCommit = null, allowPinnedTag = false } = seedDescriptor;
   const expectedSha256 = String(sha256 || '').toLowerCase();
@@ -498,6 +510,7 @@ export async function verifySeedBaseline({ seedDescriptor, bundleFile, receiptFi
     receiptFile,
     accuracyReportFile,
     recallReportFile,
+    coverageFile,
     expectedArchiveSha256: expectedSha256,
     ...(sourceCommit ? { expectedBuilderSha: sourceCommit } : {}),
   });
@@ -515,6 +528,7 @@ async function main() {
   const receiptFile = arg('--receipt', arg('--out', 'dist/corpus-receipt.json'));
   const accuracyReportFile = arg('--accuracy-report');
   const recallReportFile = arg('--recall-report');
+  const coverageFile = arg('--coverage');
   if (mode === 'create') {
     const bootstrapTag = arg('--bootstrap-tag');
     const bootstrapSha256 = arg('--bootstrap-sha256');
@@ -526,6 +540,7 @@ async function main() {
       receiptFile,
       accuracyReportFile,
       recallReportFile,
+      coverageFile,
     });
     console.log(JSON.stringify({
       ok: true, mode, archive: receipt.archive, stores: receipt.storeCount, accuracyReport: receipt.accuracyReport, recall: receipt.recallSummary,
@@ -536,6 +551,7 @@ async function main() {
       receiptFile,
       accuracyReportFile,
       recallReportFile,
+      coverageFile,
       expectedBuilderSha: arg('--expected-builder-sha'),
       expectedArchiveSha256: arg('--expected-archive-sha256'),
       expectedReceiptSha256: arg('--expected-receipt-sha256'),

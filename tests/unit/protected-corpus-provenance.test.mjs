@@ -7,8 +7,10 @@ import vm from 'node:vm';
 // No shell, no credentials, no network — and no second copy of the guard to drift from the real one.
 const workflow = fs.readFileSync(new URL('../../.github/workflows/protected-release.yml', import.meta.url), 'utf8');
 const sha = 'c'.repeat(40);
-// Independent review of ADR-0091 D3 (2026-09-28): the run's head IS the corpus source (exact equality
-// with GITHUB_SHA restored), so ONE identity binds both the run and the artifact.
+// 2026-09-29 nightly redesign: the corpus source (the approved runtime's commit, which NAMES the
+// artifact) is an ancestor of the run's own head (main at dispatch, GITHUB_SHA). Two distinct
+// identities, each bound: the run and the artifact to the run head, the artifact name to the source.
+const runHead = 'e'.repeat(40);
 const repo = 'stuinfla/ruvnet-brain';
 const workflowPath = '.github/workflows/protected-release.yml';
 const RUN_ID = 4242;
@@ -19,15 +21,16 @@ function fixture() {
     workflow: { id: 9, path: workflowPath },
     run: {
       id: RUN_ID, workflow_id: 9, path: workflowPath, event: 'workflow_dispatch',
-      run_attempt: RUN_ATTEMPT, head_sha: sha, head_branch: 'main',
+      run_attempt: RUN_ATTEMPT, head_sha: runHead, head_branch: 'main',
       repository: { id: 5, full_name: repo }, head_repository: { id: 5, full_name: repo },
     },
     artifacts: [{
       id: 77, name: `corpus-seed-prepared-${sha}`, expired: false,
-      workflow_run: { id: RUN_ID, repository_id: 5, head_repository_id: 5, head_sha: sha, head_branch: 'main' },
+      workflow_run: { id: RUN_ID, repository_id: 5, head_repository_id: 5, head_sha: runHead, head_branch: 'main' },
     }],
     env: {
       GITHUB_REPOSITORY: repo,
+      GITHUB_SHA: runHead,
       CANDIDATE_SHA: sha,
       PREPARATION_RUN_ID: String(RUN_ID),
       PREPARATION_RUN_ATTEMPT: String(RUN_ATTEMPT),
@@ -99,7 +102,10 @@ describe('protected corpus preparation artifact provenance (ADR-086 steps 9 + 17
     ['substituted run identity', (f) => { f.run.id = RUN_ID + 1; }],
     ['unusable run id input', (f) => { f.env.PREPARATION_RUN_ID = '-3'; }],
     // ── wrong SHA / ref ──────────────────────────────────────────────────────────────────────
-    ['wrong candidate source SHA', (f) => { f.run.head_sha = 'd'.repeat(40); }],
+    ['a run whose head is not this run\'s GITHUB_SHA', (f) => { f.run.head_sha = 'd'.repeat(40); }],
+    ['a run whose head is the candidate rather than this run\'s head', (f) => { f.run.head_sha = sha; }],
+    ['missing run head (GITHUB_SHA)', (f) => { delete f.env.GITHUB_SHA; }],
+    ['malformed run head (GITHUB_SHA)', (f) => { f.env.GITHUB_SHA = 'main'; }],
     ['malformed candidate source SHA input', (f) => { f.env.CANDIDATE_SHA = 'not-a-sha'; }],
     ['artifact prepared for a different corpus source', (f) => {
       f.artifacts[0].name = `corpus-seed-prepared-${'d'.repeat(40)}`;
