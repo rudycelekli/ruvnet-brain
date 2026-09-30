@@ -154,8 +154,12 @@ test cases, and a regenerated convergence manifest), consistent with the 14+-PR 
 - Witness = sha256(REPORT_HASH ‖ commit): `6fe30178bdcf25585c964960808fc1f9ff39960031ea270e35df569f80a52198`
 
 Verifier (5 steps):
-1. `git checkout dream/2026-09-30-cross-host-conformance`
+1. `git checkout dream/2026-09-30-cross-host-conformance-turn-db-symlink-escape`
 2. `sha256sum docs/dream-cycle/evidence/2026-09-30-cross-host-conformance-prestamp.md`, which must print `3000ec68…fde75e`.
 3. `printf '%s%s' 3000ec68da7b33bb2f0af232dbafdeb4629cb337cd9c4d568a71a700f0fde75e 6e0f9623b44183ee899aa64a0123cdb9f37e5451 | sha256sum`, which must print `6fe30178…a52198`.
 4. Replay the metric on the candidate: `node docs/dream-cycle/evidence/2026-09-30-cross-host-conformance-measure.mjs "$PWD"`, which must print `TOTAL_FOREIGN_WRITES 0`. Then `git checkout 6e0f962 -- plugin/scripts/turn-outcome-capture.mjs` and re-run it, which must print `TOTAL_FOREIGN_WRITES 3`. Restore with `git checkout HEAD -- plugin/scripts/turn-outcome-capture.mjs`.
 5. With the baseline file restored as in step 4, `npx vitest run tests/unit/turn-outcome-capture.test.mjs` must show 2 failing `(7)` cases. With the candidate, it must show 11/11 passing.
+
+Concurrency note (added after stamping, outside the hashed pre-stamp copy): a separate firing of this
+routine pushed draft PR #347 first to `dream/2026-09-30-cross-host-conformance` (Codex Stop schema
+citation drift). Its finding does not overlap this one, so this branch carries a suffix.
