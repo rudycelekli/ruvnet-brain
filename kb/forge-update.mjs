@@ -720,7 +720,9 @@ export function restorePrivateFilesIntoCandidate({ candidateDir, sourceDir, over
 }
 
 const manifestUrl = source.canonicalManifestUrl || stores.find((s) => s.canonicalManifestUrl)?.canonicalManifestUrl;
-if (!manifestUrl) {
+// Recovery executes from the npm package's kb directory, which deliberately has no SOURCE.json.
+// Its authenticated descriptor supplies discovery; the normal updater still requires a manifest.
+if (!manifestUrl && !STAGED_RELEASE_FILE) {
   die(`self-update not configured for this build — SOURCE.json has no canonicalManifestUrl ` +
       `(forge-build.mjs was run without --canonical-url). Provenance is still in SOURCE.json.`);
 }

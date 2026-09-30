@@ -99,6 +99,7 @@
     "kb/corpus-release-identity.mjs",
     "kb/capability-only.mjs",
     "kb/capability-summaries/",
+    "kb/forge-update.mjs",
     "kb/zip-extract.mjs",
     "kb/brain-profile.mjs",
     "kb/lifecycle-evidence-retention.mjs",
