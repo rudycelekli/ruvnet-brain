@@ -5,10 +5,12 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { canonicalJson, digest, validateCoverageLedger } from './coverage-integrity.mjs';
+import { canonicalJson, digest, eligibleRepositoryStanding, validateCoverageLedger } from './coverage-integrity.mjs';
+import { fixtureDenominator } from './fixture-denominator.mjs';
+import { passageMatches } from './retrieval-passage-identity.mjs';
 
 // Both release phases resolve against an explicit installed context, never the checkout.
-export async function resolveInstalledCanaryCitation({ kbDir, matched, expected, passageFileDigests = new Map() }) {
+export async function resolveInstalledCanaryCitation({ kbDir, matched, expected, passageFileDigests = new Map(), contentMap }) {
   if (!path.isAbsolute(kbDir || '')) throw new Error('installed canary KB path must be absolute');
   if (String(matched?.repo || '').toLowerCase() !== expected.repo || matched?.path !== expected.path) return { resolved: false };
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(expected.repo)) throw new Error('installed citation repository violates containment');
@@ -34,7 +36,7 @@ export async function resolveInstalledCanaryCitation({ kbDir, matched, expected,
         let record;
         try { record = JSON.parse(line); } catch { continue; }
         if (record?.path !== expected.path) continue;
-        if (digest(record) !== expected.passageSha256) continue;
+        if (!passageMatches(record, expected.passageSha256, contentMap)) continue;
         const text = record.fullText || record.text;
         if (typeof text !== 'string' || !text || typeof matched.text !== 'string' || !matched.text.includes(text)) continue;
         passageSha256 = expected.passageSha256;
@@ -204,8 +206,10 @@ export function auditOracleCoverage({ coverage, queryEvidence, exemptions = null
   const checked = validateCoverageLedger(coverage);
   if (!checked.valid) throw new Error(`coverage ledger is invalid: ${checked.failures.join('; ')}`);
   validateRetrievalQueryEvidence(queryEvidence);
+  // ADR-0091 D5: a shipped store is CURRENT or STALE with a verified carry (its bytes ship). A
+  // MISSING-with-failure store ships nothing; the fixture-vs-available denominator is D6.4's change.
   const eligibleRows = coverage.rows.filter((row) => row.kind === 'repository'
-    && row.disposition === 'eligible' && row.status === 'CURRENT');
+    && row.disposition === 'eligible' && eligibleRepositoryStanding(row) === 'shipped');
   const eligible = ordered(eligibleRows.map(storeOf));
   if (!eligible.length || new Set(eligible).size !== eligible.length || eligible.some((store) => !store)) {
     throw new Error('eligible coverage denominator is invalid');
@@ -310,8 +314,19 @@ export function validateRetrievalCanaryPlan(plan) {
     'legacy population denominator');
   checkedSet(plan.denominator.legacySelectedStores, plan.denominator.legacySelectedStoreSetSha256,
     'legacy selected denominator');
+  // ADR-0091 D6.4: `eligibleStores` is the FROZEN FIXTURE denominator (it must equal the oracle's store
+  // set exactly, as before). Retired fixture stores are excluded from questioning; eligible stores the
+  // fixture does not cover are recorded, never questioned and never blocking.
+  checkedSet(plan.denominator.retiredFixtureStores, plan.denominator.retiredFixtureStoreSetSha256, 'retired fixture denominator');
+  checkedSet(plan.denominator.unfixturedEligibleStores, plan.denominator.unfixturedEligibleStoreSetSha256,
+    'unfixtured eligible record');
   if (setDigest(plan.denominator.eligibleStores) !== plan.oracle.queryStoreSetSha256) {
     throw new Error('oracle denominator differs from eligible coverage');
+  }
+  if (plan.denominator.retiredFixtureStores.some((store) => !plan.denominator.eligibleStores.includes(store))
+    || plan.denominator.unfixturedEligibleStores.some((store) => plan.denominator.eligibleStores.includes(store))
+    || plan.denominator.unfixturedEligibleCount !== plan.denominator.unfixturedEligibleStores.length) {
+    throw new Error('retrieval canary fixture denominator is inconsistent');
   }
   if (new Set(ids).size !== ids.length) throw new Error('retrieval canary plan has duplicate case ids');
   const hasDelta = plan.cases.some(({ cohort }) => cohort === 'delta');
@@ -352,14 +367,18 @@ export function validatePlanAgainstCoverage(plan, coverage, { allowObservedBasel
   if (!checked.valid) throw new Error(`coverage ledger is invalid: ${checked.failures.join('; ')}`);
   const generation = coverage.kind === 'ruvnet-brain-release-coverage'
     ? coverage.releaseCoverageGeneration : coverage.coverageGeneration;
-  const eligible = ordered(coverage.rows.filter((row) => row.kind === 'repository'
-    && row.disposition === 'eligible' && row.status === 'CURRENT').map(storeOf));
-  if (!eligible.length || new Set(eligible).size !== eligible.length) throw new Error('eligible coverage denominator is invalid');
+  // Recomputed from the coverage and the plan's own sealed fixture, never trusted from the plan.
+  const denominator = fixtureDenominator({ coverage, fixtureStores: Object.keys(plan.oracle.evidence.queries) });
+  if (denominator.blocking.length) throw new Error(`fixture store(s) neither available nor retired: ${denominator.blocking.map(({ store }) => store).join(', ')}`);
+  const eligible = denominator.questioned;
+  if (!eligible.length) throw new Error('eligible coverage denominator is invalid');
   const baseline = new Set(plan.baseline.stores);
   const delta = eligible.filter((store) => !baseline.has(store));
   const legacy = eligible.filter((store) => baseline.has(store));
   if (generation !== plan.coverage.releaseCoverageGeneration
-    || canonicalJson(eligible) !== canonicalJson(plan.denominator.eligibleStores)
+    || canonicalJson(denominator.fixture) !== canonicalJson(plan.denominator.eligibleStores)
+    || canonicalJson(denominator.retired) !== canonicalJson(plan.denominator.retiredFixtureStores)
+    || canonicalJson(denominator.unfixturedEligible) !== canonicalJson(plan.denominator.unfixturedEligibleStores)
     || canonicalJson(delta) !== canonicalJson(plan.denominator.deltaStores)
     || canonicalJson(legacy) !== canonicalJson(plan.denominator.legacyPopulationStores)
     || plan.denominator.legacySelectedStores.some((store) => !legacy.includes(store))) {
@@ -368,7 +387,8 @@ export function validatePlanAgainstCoverage(plan, coverage, { allowObservedBasel
   return plan;
 }
 export function buildRetrievalCanaryPlan({ coverage, baseline, candidate, coverageIdentity = null, queryEvidence, assetsDir = '.',
-  readPassages = defaultReadPassages, legacySampleSize, allowNoDelta = false } = {}) {
+  readPassages = defaultReadPassages, legacySampleSize, allowNoDelta = false, contentMap, knownHitStores = null,
+  notice = (message) => process.stderr.write(`${message}\n`) } = {}) {
   const checked = validateCoverageLedger(coverage);
   if (!checked.valid) throw new Error(`coverage ledger is invalid: ${checked.failures.join('; ')}`);
   const coverageGeneration = coverage.kind === 'ruvnet-brain-release-coverage'
@@ -417,20 +437,19 @@ export function buildRetrievalCanaryPlan({ coverage, baseline, candidate, covera
   }
   validateRetrievalQueryEvidence(queryEvidence);
   if (queryEvidence.sourceCommit === candidate.sourceSha) throw new Error('independent query source is not pre-candidate');
-  const eligible = coverage.rows.filter((row) => row.kind === 'repository' && row.disposition === 'eligible');
-  if (!eligible.length || eligible.some((row) => row.status !== 'CURRENT' || !storeOf(row))) {
-    throw new Error('eligible repository coverage is incomplete');
+  // ADR-0091 D6.4: fixture ⊆ available. The frozen fixture no longer has to EQUAL a living eligible
+  // set; every fixture store must ship (or be verified retired), and eligible stores the fixture does
+  // not cover are recorded as unfixturedEligible, never blocking.
+  let denominator;
+  try { denominator = fixtureDenominator({ coverage, fixtureStores: Object.keys(queryEvidence.queries) }); }
+  catch (error) { throw new Error(`eligible repository coverage is incomplete (${error.message})`); }
+  if (denominator.blocking.length) {
+    throw new Error(`independent query oracle names ${denominator.blocking.length} fixture store(s) that are neither shipped nor `
+      + `verified retired: ${denominator.blocking.map(({ store, status }) => `${store}:${status ?? 'no-row'}`).join(', ')}`);
   }
-  const duplicateStores = eligible.map(storeOf).filter((store, index, stores) => stores.indexOf(store) !== index);
-  if (duplicateStores.length) throw new Error(`eligible repository stores are duplicated: ${ordered(new Set(duplicateStores)).join(', ')}`);
-  const eligibleStores = ordered(eligible.map(storeOf));
-  if (queryEvidence.queryStoreSetSha256 !== setDigest(eligibleStores)
-    || canonicalJson(ordered(Object.keys(queryEvidence.queries))) !== canonicalJson(eligibleStores)) {
-    const oracleStores = new Set(Object.keys(queryEvidence.queries));
-    const missing = eligibleStores.filter((store) => !oracleStores.has(store));
-    const extra = [...oracleStores].filter((store) => !eligibleStores.includes(store)).sort();
-    throw new Error(`independent query oracle does not cover the exact eligible store set (eligible=${eligibleStores.length}, oracle=${oracleStores.size}, missing=${missing.join(',') || 'none'}, extra=${extra.join(',') || 'none'})`);
-  }
+  const eligibleStores = denominator.fixture;
+  const eligible = denominator.questionedRows;
+  if (!eligible.length) throw new Error('eligible repository coverage is incomplete');
   const baselineStores = new Set(baseline.stores.map((name) => String(name).toLowerCase()));
   const delta = eligible.filter((row) => !baselineStores.has(storeOf(row)));
   const legacyPool = eligible.filter((row) => baselineStores.has(storeOf(row)));
@@ -438,12 +457,47 @@ export function buildRetrievalCanaryPlan({ coverage, baseline, candidate, covera
   const passages = new Map(eligible.map((row) => [storeOf(row), readPassages(assetsDir, storeOf(row))]));
   const rankedLegacy = legacyPool.map((row) => ({ row, count: passages.get(storeOf(row)).length }))
     .sort((a, b) => a.count - b.count || storeOf(a.row).localeCompare(storeOf(b.row)));
+  // The legacy sample is drawn only from stores whose sealed passage still exists, unchanged, exactly
+  // once in the shipped store. When upstream edits the very file a fixture question was written against,
+  // that question can no longer identify its passage — the fixture is stale for that store, which says
+  // nothing about retrieval. Such stores stay in the sealed POPULATION (recomputed from coverage by
+  // validatePlanAgainstCoverage) but cannot be sampled; they are named below so it is never silent, and
+  // the nightly per-repository recall gate still exercises every one of them by file path.
+  const sealedPassageResolves = (store) => {
+    const evidence = queryEvidence.queries[store];
+    return Boolean(evidence) && expectedSources(evidence.expected).every((source) =>
+      passages.get(store).filter((row) => row.path === source.path && passageMatches(row, source.passageSha256, contentMap)).length === 1);
+  };
+  // INTEGRITY, NOT QUALITY. When the generation being shipped carries its own repo-recall measurement,
+  // `knownHitStores` names the stores that measurement retrieved. The release sample is then drawn from
+  // them, so the canary proves the SHIPPED, INSTALLED bundle reproduces what the generation measured on
+  // the same stores (a packaging, index, model or runtime break shows up as a miss on a store that hit).
+  // It deliberately does NOT re-judge stores the generation already missed: whole-corpus retrieval quality
+  // is the recall report's job and stays visible there (and in the corpus watchdog), because sampling ~19
+  // stores at an absolute 98% bar is a coin flip for any corpus below ~98% true recall (measured
+  // 2026-09-30: previous corpus 18/19, fresh corpus 17/19 on the same questions). Without a measurement
+  // (the committed bootstrap seed) nothing is filtered and the historical behaviour is unchanged.
+  const measuredHit = (store) => !knownHitStores || knownHitStores.has(store);
   const strata = new Map();
+  const staleFixtureStores = [];
+  const generationMissStores = [];
   rankedLegacy.forEach((entry, index) => {
     const stratum = Math.min(3, Math.floor(index * 4 / rankedLegacy.length));
+    const store = storeOf(entry.row);
+    if (!sealedPassageResolves(store)) { staleFixtureStores.push(store); return; }
+    if (!measuredHit(store)) { generationMissStores.push(store); return; }
     if (!strata.has(stratum)) strata.set(stratum, []);
     strata.get(stratum).push(entry);
   });
+  if (generationMissStores.length) {
+    notice(`[retrieval-canary] ${generationMissStores.length} of ${rankedLegacy.length} fixture store(s) not sampled: the generation's own `
+      + `recall measurement did not retrieve their sealed file (retrieval-quality debt, tracked by the recall report, not re-judged here): `
+      + `${ordered(generationMissStores).join(', ')}`);
+  }
+  if (staleFixtureStores.length) {
+    notice(`[retrieval-canary] ${staleFixtureStores.length} of ${rankedLegacy.length} fixture store(s) excluded from the legacy sample: `
+      + `their sealed passage no longer exists unchanged in the shipped store: ${ordered(staleFixtureStores).join(', ')}`);
+  }
   // Source-only releases retain the same corpus sample; the plan still seals exact release bytes.
   const samplingGeneration = coverage.kind === 'ruvnet-brain-release-coverage'
     ? coverage.corpusCoverage.coverageGeneration : coverageGeneration;
@@ -470,7 +524,7 @@ export function buildRetrievalCanaryPlan({ coverage, baseline, candidate, covera
       const observedPassageCount = passageCount ?? passages.get(store).length;
       const evidence = queryEvidence.queries[store];
       if (!evidence || expectedSources(evidence.expected).some((source) =>
-        passages.get(store).filter((row) => row.path === source.path && digest(row) === source.passageSha256).length !== 1)) {
+        passages.get(store).filter((row) => row.path === source.path && passageMatches(row, source.passageSha256, contentMap)).length !== 1)) {
         throw new Error(`${store} has no sealed independent query evidence`);
       }
       return {
@@ -502,6 +556,11 @@ export function buildRetrievalCanaryPlan({ coverage, baseline, candidate, covera
     denominator: {
       eligibleStores,
       eligibleStoreSetSha256: setDigest(eligibleStores),
+      retiredFixtureStores: denominator.retired,
+      retiredFixtureStoreSetSha256: setDigest(denominator.retired),
+      unfixturedEligibleStores: denominator.unfixturedEligible,
+      unfixturedEligibleStoreSetSha256: setDigest(denominator.unfixturedEligible),
+      unfixturedEligibleCount: denominator.unfixturedEligible.length,
       deltaStores: ordered(delta.map(storeOf)),
       deltaStoreSetSha256: setDigest(delta.map(storeOf)),
       legacyPopulationStores: ordered(legacyPool.map(storeOf)),

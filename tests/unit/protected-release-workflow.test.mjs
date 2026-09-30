@@ -99,7 +99,8 @@ describe('protected release rail', () => {
     const source = workflow();
     expect(source).toContain('group: ruvnet-brain-release');
     expect(source).toContain('cancel-in-progress: false');
-    expect(source.match(/environment: Production – ruvnet-brain/g)).toHaveLength(3);
+    // ONE owner click per release: only the npm-carrying publish job binds the reviewed environment.
+    expect(source.match(/environment: Production – ruvnet-brain/g)).toHaveLength(1);
     expect(source.match(/node scripts\/release\.mjs --publish/g)).toHaveLength(1);
     expect(source).toContain('RUVNET_RELEASE_MODE: stabilization');
     expect(source).not.toContain('continue-on-error: true');
@@ -141,7 +142,10 @@ describe('protected release rail', () => {
 
   it('derives baseline and candidate retrieval inputs before sealing the payload', () => {
     const source = read('.github/workflows/ci.yml');
-    expect(source.match(/node scripts\/public-verification-inputs\.mjs/g)?.length || 0).toBeGreaterThanOrEqual(2);
+    // The observe-baseline half now runs inside scripts/code-release-corpus.mjs on BOTH assembly paths
+    // (ADR-0091 D6); the candidate-input derivation stays in the workflow.
+    expect(source.match(/node scripts\/public-verification-inputs\.mjs/g)?.length || 0).toBeGreaterThanOrEqual(1);
+    expect(read('scripts/code-release-corpus.mjs')).toContain("script('public-verification-inputs.mjs'), 'observe-baseline'");
     expect(source.indexOf('Build the immutable knowledge bundle exactly once'))
       .toBeLessThan(source.indexOf('node scripts/public-verification-inputs.mjs'));
     expect(source.indexOf('node scripts/public-verification-inputs.mjs'))
@@ -160,6 +164,27 @@ describe('protected release rail', () => {
     expect(source).toContain("-type f -name '*.big.rvf'");
     expect(source).toContain("! -path '*/__MACOSX/*' ! -name '._*'");
     expect(source).toContain("LC_ALL=C sort -u");
-    expect(source).toContain('node scripts/rvf-index-audit.mjs --dir "${asset_dirs[0]}"');
+    // The index repair now runs inside the legacy (bootstrap-only) branch of the orchestrator, on the
+    // directory this selection found (ADR-0091 D6).
+    expect(source).toContain('--assets "${asset_dirs[0]}"');
+    expect(read('scripts/code-release-corpus.mjs')).toContain("script('rvf-index-audit.mjs'), '--dir', assets, '--repair'");
+  });
+
+  it('asks the owner once per release, and a failed publish can be re-run in place', () => {
+    const source = workflow();
+    // Job blocks: split ONLY at two-space job headers ("\n  name:\n"), never at deeper indentation.
+    const blocks = Object.fromEntries(source.split(/\n(?=  [a-z][a-z-]*:\n)/)
+      .filter((block) => /^  [a-z][a-z-]*:\n/.test(block))
+      .map((block) => [block.slice(2, block.indexOf(':')), block]));
+    const reviewed = Object.keys(blocks).filter((job) => blocks[job].includes('environment: Production – ruvnet-brain'));
+    expect(reviewed).toEqual(['publish']);
+    for (const job of ['seal-payload', 'finalize-public-verification']) {
+      expect(blocks[job], job).toContain('environment: Production – corpus');
+      const executable = blocks[job].split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
+      expect(executable, job).not.toContain('NPM_TOKEN');
+    }
+    expect(source).not.toMatch(/publisher-payload-[^\n]*run_attempt/);
+    expect(source.match(/name: publisher-payload-\$\{\{ github\.run_id \}\}\n/g)).toHaveLength(2);
   });
 });
+

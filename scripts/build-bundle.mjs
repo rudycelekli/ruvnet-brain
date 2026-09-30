@@ -62,11 +62,13 @@ import { validatePublicInventory } from './public-inventory.mjs';
 import { bindAssembledReleaseProjection, createReleaseProjection } from './release-projection.mjs';
 import { materializePublicInputs, SELECTION_FILE, validateSelectionReceipt } from './public-inputs.mjs';
 import { isPrivate, loadPrivateSlugs, shouldFenceL2 } from './private-fence.mjs';
-import { validateCoverageLedger } from './coverage-integrity.mjs';
+import { eligibleRepositoryStanding, validateCoverageLedger } from './coverage-integrity.mjs';
 // The org total is DERIVED, never a literal: it was hardcoded 248 in this file and in its
 // sibling while the account actually had 200 — one stale fact, restated twice (2026-08-12).
 import { orgRepoCount } from './org-repo-count.mjs';
 import { assertCapabilityOnlyStore } from '../kb/capability-only.mjs';
+import { CURRENCY_BASIS, corpusCurrencyBlock } from './corpus-currency.mjs';
+import { loadFixture } from './oracle/repo-recall.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -566,6 +568,8 @@ async function assembleBundleImpl({ corpusDir, runtimeRoot, outDir, identity = {
   // and is never rewritten here, so they are declared to validateSelectedRvfGenerations as explicitly
   // EXCLUDED rather than left looking like unexplained extra generation records.
   const legacyExcluded = [];
+  // The bootstrap tag the legacy pass-2 projection was produced from (manifest.corpus.generationTag).
+  let legacySeedTag = null;
   // LEGACY SEED pass 2 (retires at plan step 11): the externally-produced release projection is the
   // selection authority for this mode, exactly as it was before the step-5 consolidation. Scope the
   // discovered set to the stores that projection actually bound, so the assembled tree and
@@ -597,6 +601,7 @@ async function assembleBundleImpl({ corpusDir, runtimeRoot, outDir, identity = {
     if (legacyCoverage?.kind !== 'ruvnet-brain-release-coverage' || !Array.isArray(legacyCoverage.rows)) {
       fail('legacy release projection coverage is not a ruvnet-brain-release-coverage ledger');
     }
+    legacySeedTag = typeof legacyCoverage.corpusSeed?.tag === 'string' ? legacyCoverage.corpusSeed.tag : null;
     const projectedClasses = path.join(path.resolve(legacySeedProjection.projectionDir), 'public-store-classes.json');
     const projectedDerived = fs.existsSync(projectedClasses)
       ? (JSON.parse(fs.readFileSync(projectedClasses, 'utf8')).derived || []).map((e) => String(e?.store || '').toLowerCase())
@@ -672,6 +677,11 @@ async function assembleBundleImpl({ corpusDir, runtimeRoot, outDir, identity = {
     // validatePublicInventory has already bound that ledger to the bytes on disk.
     for (const row of corpusCoverage.rows) {
       if (row.disposition !== 'eligible') continue;
+      // ADR-0091 D5: a MISSING row with a `failure` record ships no store at all (validatePublicInventory
+      // already proved no bytes exist under its name), so there is no ledger generation to bind. A
+      // STALE row with a `carry` record binds below exactly like a CURRENT one: its artifact digest and
+      // source generation ARE the carried bytes this ledger carries.
+      if (row.kind === 'repository' && eligibleRepositoryStanding(row) === 'absent') continue;
       const store = String(row.artifact?.store || '');
       const generation = ledgerIn.stores?.[store]
         || Object.entries(ledgerIn.stores || {}).find(([key]) => key.toLowerCase() === store.toLowerCase())?.[1];
@@ -886,10 +896,26 @@ async function assembleBundleImpl({ corpusDir, runtimeRoot, outDir, identity = {
   // sealed bytes never depends on, or varies with, network availability.
   const ORG = orgRepoCount({ fetch: () => null });
   const hasConcepts = selectedResults.some((r) => r.kind === 'derived' && r.name.toLowerCase() === 'concepts');
+  // ADR-0091 D7.1: `generated` is the ASSEMBLY time and must never be read as freshness. `corpus` says
+  // what is actually known about content currency, from the sealed coverage this archive was bound to
+  // above (null fields where nothing was observed -- never estimated). See scripts/corpus-currency.mjs.
+  const fixtureFile = path.join(dataDir, 'retrieval-query-evidence.json');
+  let fixtureStores = null;
+  if (corpusCoverage && fs.existsSync(fixtureFile)) {
+    try { fixtureStores = loadFixture(fixtureFile).questions.map((question) => question.store); }
+    catch (error) { fail(`frozen retrieval fixture is unreadable (${error.message})`); }
+  }
+  const corpusCurrency = corpusCurrencyBlock({
+    coverage: corpusCoverage,
+    basis: corpusCoverage ? CURRENCY_BASIS.SEALED : legacySeed ? CURRENCY_BASIS.LEGACY : CURRENCY_BASIS.NONE,
+    generationTag: seedIdentity?.tag ?? legacySeedTag,
+    fixtureStores,
+  });
   const manifest = {
     brainVersion: version, // FIELD = bare literal; versionTag stays the v-prefixed Release tag
     generated: now.toISOString(),
     generatedHuman: now.toUTCString(),
+    corpus: corpusCurrency,
     coverage: { built: manifestEntries.length, catalogued: regFlat.length, orgTotalApprox: ORG.count, orgTotalSource: ORG.source, orgTotalAt: ORG.at, pending: pendingRepos.length },
     crossRepoTool: { mcp: 'forge-mcp-all.mjs', cli: 'forge-ask-all.mjs', tool: 'search_ruvnet' },
     conceptsStore: hasConcepts ? { store: 'concepts.big.rvf', note: 'L2 synthesis + per-repo primers embedded as prose; unioned by search_ruvnet so code-implemented capabilities are retrievable as high-confidence prose.' } : null,

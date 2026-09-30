@@ -341,7 +341,13 @@ function assertExclusionEvidence(repo, exclusion, upstreamSha) {
   }
 }
 
-export function classifyRepository(repo, evidence, exclusion = null) {
+// ADR-0091 D5: `outcome` is what reconciliation recorded for this store when its refresh FAILED this
+// generation -- { carry } (previous bytes kept, already re-hashed against the ledger), { failure } (no
+// prior bytes), or { integrity } (carried bytes failed that re-hash). The status token is always the
+// one the evidence proves; the record is attached only where it agrees with that status, so a carry
+// can never dress up a row the bytes do not support. Rows are annotated BEFORE sealing, so the
+// coverage generation digest covers them.
+export function classifyRepository(repo, evidence, exclusion = null, outcome = null) {
   const upstreamSha = repo.defaultBranchRef?.target?.oid || null;
   const activeExclusion = Boolean(exclusion && String(exclusion.pushedAt || '') !== ''
     && String(exclusion.pushedAt) === String(repo.pushedAt || ''));
@@ -373,6 +379,14 @@ export function classifyRepository(repo, evidence, exclusion = null) {
   else if (evidence.receipt.sourceCommit !== upstreamSha) { status = 'STALE'; reasons.push('receipt sourceCommit differs from upstream HEAD'); }
   else if (!evidence.bytesVerified) { status = 'FAILED'; reasons.push('RVF bytes do not match receipt'); }
   else if (!evidence.passagesPresent) { status = 'FAILED'; reasons.push('passage inventory is absent'); }
+  const disposed = isIngestibleDisposition(disposition);
+  if (disposed && outcome?.integrity && ['CURRENT', 'STALE'].includes(status)) {
+    status = 'FAILED';
+    reasons.push(outcome.integrity);
+  }
+  const record = {};
+  if (disposed && outcome?.carry && status === 'STALE') record.carry = { ...outcome.carry };
+  if (disposed && outcome?.failure && status === 'MISSING') record.failure = { ...outcome.failure };
   return {
     key: repo.fullName ? `repo:${repo.fullName.toLowerCase()}` : `repo:${repo.databaseId}`,
     kind: 'repository',
@@ -391,6 +405,7 @@ export function classifyRepository(repo, evidence, exclusion = null) {
       cardPresent: evidence.cardPresent },
     status,
     reasons,
+    ...record,
   };
 }
 
@@ -567,7 +582,7 @@ export function explainCoverageDrift(recorded, current) {
 // where they are source-controlled (`<repo>/kb`) unless the caller names both directories, as the
 // release path does with `--assets`.
 export function buildCoverage({ owner = 'ruvnet', env = process.env, home = os.homedir(), kbDir = null, policyDir = null,
-  observation = null, gh = runGh, now = () => new Date().toISOString() } = {}) {
+  observation = null, gh = runGh, now = () => new Date().toISOString(), storeOutcomes = null } = {}) {
   policyDir ??= kbDir ?? path.join(ROOT, 'kb');
   kbDir ??= storeRoot(env, home);
   if (rootNeverMaterialized(kbDir)) {
@@ -597,7 +612,8 @@ export function buildCoverage({ owner = 'ruvnet', env = process.env, home = os.h
   const exclusions = fs.existsSync(exclusionsPath) ? JSON.parse(fs.readFileSync(exclusionsPath, 'utf8')) : {};
   const rows = repositories.rows.map((repo) => {
     const store = storeName(repo.storeName || repo.name);
-    return classifyRepository(repo, artifactEvidence(kbDir, ledger, cardStores, store), exclusions[store] || null);
+    return classifyRepository(repo, artifactEvidence(kbDir, ledger, cardStores, store), exclusions[store] || null,
+      storeOutcomes?.[store.toLowerCase()] || null);
   });
   const gistEvidence = { ...artifactEvidence(kbDir, ledger, cardStores, 'ruv-gists'), sources: gistSources };
   try {

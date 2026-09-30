@@ -16,7 +16,7 @@ instructions. `npm run single-source:check` fails CI if a second, conflicting in
 | Set the version | `npm run version:set -- X.Y.Z` (first commit of the release branch) | `npm run version:check` exits 0 |
 | Release code | Preflight → fast-forward `main` → dispatch `protected-release.yml mode=code` → owner approves the `Production – ruvnet-brain` deployment | Terminal receipt `install-verified` on Linux, macOS, Windows; npm `latest` = GitHub `releases/latest` = `main` |
 | Build the customer corpus | CI only: `corpus-seed.yml` → `scripts/corpus-reconcile.mjs` | Sealed candidate + receipt artifact |
-| Publish the corpus | `protected-release.yml mode=corpus` (nightly dispatcher), armed only while repository variable `CORPUS_NIGHTLY` is `on` **and** `main` HEAD is itself the newest code release and that release is `install-verified` (resolved at run time, `scripts/approved-runtime.mjs --resolve`; never a committed file, never a fallback to an older release); the corpus is built at that commit | `corpus-sha256-*` release promoted to `releases/latest` |
+| Publish the corpus | `protected-release.yml mode=corpus` (nightly dispatcher), armed unless repository variable `CORPUS_NIGHTLY` is `off` (the owner's kill switch) **and** the newest code release is `install-verified` (resolved at run time, `scripts/approved-runtime.mjs --resolve`; never a committed file, never a fallback to an older release); the corpus is built at that release's source commit, and `main` being ahead of it does not matter; a night with no upstream change publishes nothing | `corpus-sha256-*` release promoted to `releases/latest` |
 | Update a user's machine | One owner per machine: the Brain's scheduler (`npx ruvnet-brain --enable-nightly`) **or** agentic-kit (`ak sync`) — never both | `SOURCE.json` `releaseTag` equals the plugin version; latest `~/.cache/ruvnet-brain/refresh-runs/*.json` is PASS |
 
 Nothing else publishes. `scripts/release-authority.mjs` fails CI if any file other than
@@ -66,18 +66,43 @@ captured by `scripts/gist-receipts.mjs` (the single gist pipeline). The job need
 secret `RUVNET_GISTS_TOKEN` (a GitHub token with no scopes) — without it, gist listing falls back
 to anonymous API calls and is rate-limited.
 
-**Published nightly, only when armed.** `corpus-nightly-dispatch.yml` (07:17 UTC) dispatches
-`protected-release.yml mode=corpus`, which signs and promotes a `corpus-sha256-*` release. It stands
-down unless the repository variable `CORPUS_NIGHTLY` is exactly `on` (the owner's kill switch; unset
-means off, and flipping it needs no code release) **and** an approved runtime resolves.
+**Published nightly.** `corpus-nightly-dispatch.yml` (07:17 UTC) dispatches
+`protected-release.yml mode=corpus`, which signs and promotes a `corpus-sha256-*` release. It is armed
+unless the repository variable `CORPUS_NIGHTLY` is exactly `off` (the owner's kill switch; flipping it
+needs no code release) and it stands down (green, not failed) until an approved runtime resolves. A
+night whose upstream inputs are unchanged since the newest generation ends `no-change` and publishes
+nothing. `corpus-watchdog.yml` (17:17 UTC) turns red, and pages through `ntfy-alerts`, when no night has
+ended `published` or `no-change` in 48 hours, so a silent stand-down cannot go unnoticed.
 The approved runtime is never committed: `node scripts/approved-runtime.mjs --resolve` takes the newest
 `vX.Y.Z` release only, requires its signed `public-verification-aggregate.json` to verify against
 `keys/ruvnet-brain-signing.pub.pem`, and rebuilds the runtime pin from that release's own zip
 (ADR-0091 D3). It never falls back to an older release: promoting an older runtime over the live code
 release breaks fresh installs. No aggregate yet = the nightly stands down (exit 3); an aggregate that
-does not verify = a loud failure. The corpus is built at that release's source commit, which must be
-exactly `main` HEAD, and its executables are the install-verified ones byte for byte. Never commit `data/approved-runtime.json`; `single-source:check`
+does not verify = a loud failure. The corpus is built at that release's source commit (`main` may be ahead of it), its
+executables are the install-verified ones byte for byte, and if a newer code release appears before the
+corpus publishes, the night ends `superseded` (a warning, not a failure). Never commit `data/approved-runtime.json`; `single-source:check`
 C1 fails if one appears.
+**Releasing code that carries the newest corpus (ADR-0091 D6) — three rules learned the hard way (4.3.37).**
+1. *Stamp the census before you push.* `release-qe` requires the committed claim surfaces (README, `explainer/*`)
+   to state the candidate KB's exact chunk and public-store counts. Assemble the candidate the way `release-qe`
+   does (`scripts/corpus-next-seed.mjs --require-coverage`, then `scripts/code-release-corpus.mjs assemble`, ~1
+   minute locally), run `RUVNET_BRAIN_KB=<dist/ruvnet-brain> node scripts/sync-census.mjs`, commit the four files.
+   Set the repository variable `CORPUS_NIGHTLY=off` for the release window: a nightly that publishes generation
+   G+1 mid-release invalidates the stamp (and `release.mjs` refuses to ship after G+1); turn it back on once the
+   release is install-verified.
+2. *The fixture is frozen; identity is by content.* `data/retrieval-query-evidence.json` pins each expected
+   passage by `digest(row)` including the row's build-dependent `id`; its digest is what `corpus-next-seed`
+   judges a generation's recall report against, so editing it orphans every published generation. Content
+   identity comes from `data/retrieval-passage-content-digests.json` (`scripts/retrieval-passage-identity.mjs`),
+   derived mechanically by `scripts/derive-passage-content-map.mjs` from a corpus built with ordinal ids and bound
+   to the fixture bytes by a test. Re-derive it if the fixture ever changes.
+3. *The release canary proves integrity, not corpus quality.* It samples ~10% of the fixture stores and asks the
+   real installed search for them (recall@10 ≥ 0.98 of the sample). With the generation's own repo-recall report
+   (`--baseline-recall`, bound to the exact archive and fixture) it samples only stores that report retrieved, so
+   it detects a packaging, index, model or runtime break; stores the generation missed, and stores whose sealed
+   passage upstream has since rewritten, are named in the log and never hidden. Whole-corpus quality is the recall
+   report's number (Hit@5 was 162/182 = 89.0% on 2026-09-29 against the owner's ≥98% target) and belongs to
+   retrieval work, not to a gate edit.
 
 **Local ingestion is for development.** `node scripts/ingest-repo.mjs --name <repo> [--org <org>]`
 makes a repo searchable on *this* machine immediately. It never reaches users; a repo reaches users
@@ -137,7 +162,12 @@ Project-level hooks are empty. The installed plugin registers exactly the hooks 
 `plugin/scripts/hook-shim.mjs`: SessionStart restore; UserPromptSubmit grounding + advisories;
 PreToolUse `decision-gate` on file writes (the only hook that may refuse, for rUv-product code
 without a fresh `search_ruvnet`); PostToolUse grounding stamp; Stop continuation and grounding
-check; snapshot capture on Stop/PreCompact/SessionEnd. `npm run hooks:check` and
+check; snapshot capture on Stop/PreCompact/SessionEnd. The same snapshot capture records each
+turn's outcome at Stop (final assistant text, files changed, command descriptions — never user
+text) to AgentDB namespace `turns` — the project's `.swarm/memory.db` if it exists, otherwise
+`~/.claude/global-memory/.swarm/memory.db`; `.swarm` is never created in a repository — and at
+SessionEnd/PreCompact runs `ruflo memory distill run` on that db so the records become patterns.
+Writes run in a detached worker; `RUVNET_TURN_CAPTURE=off` disables it. `npm run hooks:check` and
 `npm run wired:check` fail on any hook or module that is registered-but-missing or present-but-unwired.
 
 ## Tests

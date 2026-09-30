@@ -126,7 +126,8 @@ describe('every author-side consumer asks for the CODE generation, not the lates
     // this test defends is that the names the client looks up are still ATTACHED and still spelled
     // the same — bin/install.mjs:103 and verify-channels check #4 resolve assets BY NAME, never by
     // an exact set — so an added asset is compatible while a rename or a removal is not.
-    expect(release).toContain('const assetFiles = [bundleFile, signatureFile, digestFile, receiptFile, accuracyReportFile, recallReportFile];');
+    // ADR-0091 D6.2 appended the generation's coverage + its sidecar; every earlier name stays first and unchanged.
+    expect(release).toContain('const assetFiles = [bundleFile, signatureFile, digestFile, receiptFile, accuracyReportFile, recallReportFile,\n    coverageAssets.coverageFile, coverageAssets.receiptFile];');
     expect(release).toContain('const accuracyReportFile = `${bundleFile}.accuracy.json`;');
     // The BLOCKING retrieval evidence ships too (ADR-086 amendment 2026-09-15). A customer that
     // downloads the archive must be able to re-verify BOTH the number that qualified the release and
