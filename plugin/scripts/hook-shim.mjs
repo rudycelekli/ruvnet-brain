@@ -344,6 +344,9 @@ function runHook(file, activeVersion = '') {
   // invocation if the user flips the switch while the hook is mid-run.
   const env = {
     ...process.env,
+    // The card-result validator needs the same Node that launched this shim, including hosts
+    // that invoke it by absolute path while Node is absent from PATH.
+    ...(hookId === 'grounding-stamp' ? { RUVNET_GROUNDING_NODE: process.execPath } : {}),
     ...(activeVersion ? { RUVNET_BRAIN_ACTIVE_VERSION: activeVersion } : {}),
     ...(BRAIN_OFF && entry.offBehavior === 'partial' ? { RUVNET_BRAIN_OFF: '1' } : {}),
   };

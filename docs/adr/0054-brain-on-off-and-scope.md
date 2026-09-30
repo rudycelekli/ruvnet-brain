@@ -3,7 +3,7 @@ id: ADR-054
 title: Brain on/off and per-part scope — a user-controlled brain that can never silently lie about being off
 status: Accepted
 date: 2026-07-26
-updated: 2026-09-27
+updated: 2026-09-30
 updated_source: derived-from-git
 reviewed_digest: 1e0dac253cc3
 version: 1.1.6
@@ -26,7 +26,7 @@ governs:
   - bin/install.mjs
 created_at: 2026-07-26T20:19:14-04:00
 created_at_source: derived-from-git
-updated_at: 2026-08-21T08:10:43-04:00
+updated_at: 2026-09-30T14:08:50-04:00
 updated_at_source: authored-current
 ---
 
@@ -135,9 +135,11 @@ publication; explicit QA and publication retain their own gates. See
 - **Brain-DEPENDENT gates disarm via the sentinel**: `ground-before-write.sh` (wired in the
   USER's settings.json, outside the shim — both reviewers caught that the drafted chokepoint
   never reached it) checks `[ -f brain-off ]` first and degrades to a one-line advisory.
-- **Stamps**: `grounding-stamp.sh` stamps ONLY on a successful grounded result (today it stamps
-  from the QUERY, so a refusal minted a valid 24h stamp and the gate silently stopped meaning
-  anything — the duel's stamp-from-refusal find, fixed as part of this ADR).
+- **Stamps**: `grounding-stamp.sh` stamps ONLY on a successful grounded result. The heavy lane
+  carries its search banner; the fast card lane carries a query-bound, content-hashed structured
+  retrieval hit and does not claim a heavy search occurred. Both mint the vocabulary-independent
+  turn marker; product stamps still come only from the query. Refusals and empty results mint
+  nothing (the duel's original stamp-from-refusal finding remains closed).
 - **Maintenance is its own visible toggle**: default keeps the nightly running while off (quiet),
   disclosed in the console ("off — still auto-updating; click to pause updates too"), honoring
   both reviewers' halves of the one genuine disagreement.

@@ -23,10 +23,10 @@
 #     Measured on the pre-fix tree, in tests/unit/brain-off.test.mjs's recorded red run: five
 #     distinct non-answers, five valid stamps.
 #
-# The success signal is the one line kb/forge-mcp-all.mjs prints on every genuinely-executed search
-# and on nothing else — `Searched <n> RuvNet repos (...)` — with the four known non-answers refused
-# explicitly first. Cheapest reliable signal in the payload: no parsing, no field extraction, plain
-# substring matching over the raw stdin, all of it bash builtins. The refusal markers are quote-free
+# The heavy-lane success signal is `Searched <n> RuvNet repos (...)`, with non-answers refused
+# first. A fast-lane card answer deliberately has no heavy-search banner; its query-bound,
+# content-hashed structured retrieval hit supplies the success signal instead. Legacy refusal
+# markers are checked with bash substring matching before either path. They are quote-free
 # on purpose: a PostToolUse payload JSON-encodes the tool response, so anything containing a double
 # quote would arrive as \" and never match.
 #
@@ -64,12 +64,43 @@ case "$INPUT" in
   *"(no results"*)              exit 0 ;;
 esac
 
-# ── 2. REQUIRE the success banner. No banner ⇒ no successful search happened in this payload ⇒ no
-# stamp. This is what makes a missing or empty tool_response mint nothing, which is the query-only
-# behaviour finally gone.
+# ── 2. REQUIRE successful evidence. Preserve the legacy heavy-lane banner; for a card answer,
+# parse the tool RESPONSE (never markers in the query) and verify the existing retrieval wire
+# contract. Node already runs the hook shim on both hosts. No package import or store read is
+# needed, and a missing runtime or malformed/truncated payload conservatively mints nothing.
 case "$INPUT" in
   *"Searched "*"RuvNet repos"*) ;;
-  *) exit 0 ;;
+  *)
+    printf '%s' "$INPUT" | "${RUVNET_GROUNDING_NODE:-node}" -e '
+      const { createHash } = require("node:crypto");
+      try {
+        const input = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+        let result = input.tool_response;
+        if (typeof result === "string") result = JSON.parse(result);
+        const retrieval = result?.structuredContent?.retrieval;
+        const card = result?.structuredContent?.cardLane;
+        const row = retrieval?.results?.[0];
+        const safePath = typeof row?.path === "string" && row.path.length > 0
+          && !require("node:path").posix.isAbsolute(row.path)
+          && !require("node:path").win32.isAbsolute(row.path)
+          && !row.path.split(/[\\/]/).includes("..");
+        const valid = /^(?:.*__)?search_ruvnet$/.test(input.tool_name || "")
+          && result?.isError === false && !result.disabled && !result._meta?.disabled
+          && retrieval?.schemaVersion === 1 && retrieval.kind === "ruvnet-brain.retrieval-result"
+          && typeof input.tool_input?.query === "string" && input.tool_input.query.length > 0
+          && retrieval.query === input.tool_input.query
+          && Number.isSafeInteger(retrieval.k) && retrieval.k >= 1
+          && Array.isArray(retrieval.results) && retrieval.results.length === 1
+          && row?.rank === 1 && /^[a-z0-9][a-z0-9._-]*$/i.test(row.repo || "") && safePath
+          && card?.repo === row.repo && card.path === row.path
+          && typeof row.text === "string" && row.text.length > 0
+          && row.contentSha256 === createHash("sha256").update(row.text).digest("hex")
+          && Array.isArray(result.content)
+          && result.content.some(c => c.type === "text" && typeof c.text === "string" && c.text.includes(row.text));
+        process.exit(valid ? 0 : 1);
+      } catch { process.exit(1); }
+    ' 2>/dev/null || exit 0
+    ;;
 esac
 
 DIR="$HOME/.cache/ruvnet-brain/grounded"
