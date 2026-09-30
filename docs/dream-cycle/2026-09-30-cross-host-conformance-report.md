@@ -240,8 +240,8 @@ deserves the owner's direct attention independent of tonight's finding.
 
 ```
 SESSION_COMMIT = 6e0f9623b44183ee899aa64a0123cdb9f37e5451
-REPORT_HASH    = 5dc8d327616b415d83f47d6af846e163884cb64b8b415cb7a9171411493570b1
-WITNESS        = d6aaab67a021b40857061d81266d62ce6c95e702abfe9509dee3ee0108b55dd1
+REPORT_HASH    = a915708ec5e2b363705470cbaa28743cd5ed8f93d125ce4e79bbdf6776e3762c
+WITNESS        = 59f4955ce7693ee9ff5a4c03c4e3458fb6663ff982df1d4e97ba4eedef35dd3f
 ```
 
 `REPORT_HASH` is the sha256 of this report's content through the end of the "Next steps" section,
@@ -260,3 +260,30 @@ not evidence of tampering.
 5. `git stash pop`, re-run the same file (4/4 green), then
    `npx vitest run tests/unit/codex-claude-hook-parity.test.mjs tests/unit/codex-lifecycle-hooks.test.mjs tests/unit/flywheel-cadence.test.mjs tests/unit/entrypoint-guard-safety.test.mjs tests/unit/hook-contracts-doctor.test.mjs tests/unit/hook-registry-lint.test.mjs tests/unit/codex-blocking-hooks-parity.test.mjs tests/unit/decision-gate.test.mjs tests/integration/hook-conformance-both-hosts.test.mjs`
    and confirm the same pass counts reported above.
+
+---
+
+## Addendum: post-push CI failure, found and fixed (added after PR #347 was opened; does not affect
+the Witness stamp above — this section is appended after it, outside the hashed region)
+
+The first push (`8c7f261`) failed CI's `qualify-development` check: `release-source-identity`
+(`node scripts/convergence-manifest.mjs`) reported `manifest is stale; run npm run convergence:write`
+— this branch added/changed 4 tracked files without regenerating `data/convergence-manifest.json`.
+`canonical-qa` failed as a downstream mirror of that same result. Fixed with the repo's own tooling
+(`npm run convergence:write`, never hand-edited) and verified locally with
+`node scripts/release-qualification.mjs --suite source`: all 4 watchdogs PASS (`release-version`,
+`release-source-identity`, `automatic-hook-retirement`, `release-source-linux`). Pushed as a third
+commit (`ae4433d`); confirmed via GitHub Actions that `qualify-development`, `canonical-qa`,
+`integration`, and `Vercel Preview Comments` all report `success` on that commit.
+
+Separately: this addendum's own existence is the reason `REPORT_HASH`/`WITNESS` above were
+**recomputed once**, after the Gist section was updated with the real (403-denied) outcome — the
+first hash was taken before that edit landed and would not have verified against the file's final
+pre-Witness content. The values now in the Witness block above are the corrected, final ones; this
+addendum records that correction rather than silently overwriting history.
+
+Noted for the record: the local pre-push hook (`scripts/development-push-check.mjs`) only scans
+unpublished commits for credential-shaped values by design — its own header states "release
+qualification belongs to the single hosted producer, never a second checkout's Git hook" — so it does
+not run `convergence-manifest.mjs` and could not have caught this locally before push. That is the
+intended architecture, not a hook gap.
