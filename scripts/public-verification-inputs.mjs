@@ -11,6 +11,7 @@ import { extractZip } from '../kb/zip-extract.mjs';
 import { canonicalJson, digest, validateCoverageLedger, validateCoverageLink } from './coverage-integrity.mjs';
 import { validatePublicInventory } from './public-inventory.mjs';
 import { verifySeedBaseline } from './corpus-candidate.mjs';
+import { loadFixture, readRecallReport } from './oracle/repo-recall.mjs';
 import {
   buildRetrievalCanaryPlan,
   validateRetrievalQueryEvidence,
@@ -250,6 +251,19 @@ function retrospectiveBaselineFromTree({ extractedRoot, bundleFile, expectedTag,
   return { receipt, bytes, fileSha256: crypto.createHash('sha256').update(bytes).digest('hex'), root, archiveManifest };
 }
 
+/**
+ * ADR-0091 D6.3: does the baseline archive carry the seed's own published tag? A code-release seed
+ * (vX.Y.Z) records that tag in its generation ledger. A corpus-generation seed CANNOT: its tag is
+ * corpus-sha256-<the archive's own digest>, which no file inside the archive can contain, and its
+ * ledger names the runtime that built it. So a content-addressed tag is proven by the archive digest
+ * it names; every other tag must equal the ledger's releaseTag, exactly as before.
+ */
+export function baselineTagMatches({ publishedTag, ledgerReleaseTag, archiveSha256 }) {
+  const contentAddressed = /^corpus-sha256-([0-9a-f]{64})$/.exec(String(publishedTag || ''));
+  if (contentAddressed) return contentAddressed[1] === archiveSha256;
+  return typeof publishedTag === 'string' && publishedTag.length > 0 && ledgerReleaseTag === publishedTag;
+}
+
 function observedBaselineFromTree({ extractedRoot, bundleFile, expectedTag, expectedSha256, expectedBytes }) {
   const ledgerFile = findNamed(extractedRoot, 'RVF-GENERATIONS.json');
   const root = path.dirname(ledgerFile);
@@ -259,7 +273,9 @@ function observedBaselineFromTree({ extractedRoot, bundleFile, expectedTag, expe
     fail('historical baseline generation ledger is malformed');
   }
   const archive = namedIdentity(bundleFile);
-  if (ledger.releaseTag !== expectedTag) fail('historical baseline differs from the expected public release tag');
+  if (!baselineTagMatches({ publishedTag: expectedTag, ledgerReleaseTag: ledger.releaseTag, archiveSha256: archive.sha256 })) {
+    fail('historical baseline differs from the expected public release tag');
+  }
   if (!HEX64.test(String(expectedSha256 || '')) || archive.sha256 !== expectedSha256) {
     fail('historical baseline differs from the expected public archive SHA-256');
   }
@@ -415,9 +431,27 @@ function writeExactOutputs(outDir, outputs) {
   return root;
 }
 
+/**
+ * The stores a corpus generation's OWN repo-recall measurement retrieved (exact file within top-k). The
+ * report is bound to the exact baseline archive (sha256 + bytes) and to the frozen fixture the canary
+ * samples from, and is re-derived through the same reader the corpus pipeline uses — a report for another
+ * archive or another fixture is refused, never silently accepted.
+ */
+export function measuredHitStores({ recallFile, baselineArchive, oracleFile }) {
+  const stat = fs.statSync(baselineArchive);
+  // A report that claims retired questions must be verified against the coverage it names; the
+  // generation's sealed coverage sits beside its report in the seed directory when it exists.
+  const siblingCoverage = path.join(path.dirname(path.resolve(recallFile)), 'CORPUS-COVERAGE.json');
+  const { report } = readRecallReport({ reportFile: recallFile,
+    archive: { sha256: sha256File(baselineArchive), bytes: stat.size },
+    expectedFixtureSha256: loadFixture(oracleFile).fixtureSha256,
+    coverageBytes: fs.existsSync(siblingCoverage) ? fs.readFileSync(siblingCoverage) : null });
+  return new Set(report.rows.filter((row) => Number.isInteger(row.exactFileRank)).map((row) => String(row.store).toLowerCase()));
+}
+
 export async function createPublicVerificationInputs({ baselineBundle, candidateBundle,
   candidatePackage, oracleFile, repo = process.cwd(), outDir = 'release-evidence', baselineMode = 'verified',
-  baselineReceipt = null } = {}) {
+  baselineReceipt = null, baselineRecall = null } = {}) {
   const baselineArchive = trustedFile(baselineBundle, 'baseline archive');
   const candidateArchive = trustedFile(candidateBundle, 'candidate archive');
   const packageFile = trustedFile(candidatePackage, 'candidate package');
@@ -476,7 +510,8 @@ export async function createPublicVerificationInputs({ baselineBundle, candidate
         fail('baseline archive bytes differ from release coverage');
       }
       if (seed.receiptSha256 !== baselineProof.fileSha256) fail('baseline receipt differs from release coverage');
-      if (seed.tag !== baselineProof.receipt.releaseTag) {
+      if (!baselineTagMatches({ publishedTag: seed.tag, ledgerReleaseTag: baselineProof.receipt.releaseTag,
+        archiveSha256: baselineProof.receipt.archive.sha256 })) {
         fail('baseline release tag differs from release coverage');
       }
       const baselineStores = baselineProof.receipt.stores.map(({ name }) => name);
@@ -497,9 +532,11 @@ export async function createPublicVerificationInputs({ baselineBundle, candidate
   verifyQueryOracleSource(queryEvidence, candidateResult.candidate.sourceSha, {
     cwd: path.resolve(repo), allowSquashedSource: true,
   });
+    const knownHitStores = baselineRecall
+      ? measuredHitStores({ recallFile: baselineRecall, baselineArchive, oracleFile: oraclePath }) : null;
     const plan = buildRetrievalCanaryPlan({ coverage: candidateResult.coverage, baseline,
       candidate: candidateResult.candidate, coverageIdentity: candidateResult.coverageIdentity,
-      queryEvidence, assetsDir: candidateTree.root, allowNoDelta: true });
+      queryEvidence, assetsDir: candidateTree.root, allowNoDelta: true, knownHitStores });
     writeExactOutputs(outDir, {
       [baselineMode === 'observed' ? 'baseline-observation-receipt.json' : 'baseline-verification-receipt.json']: baselineProof.bytes,
       'COVERAGE.json': candidateResult.coverageBytes,
@@ -558,6 +595,7 @@ export async function main(argv = process.argv.slice(2)) {
     outDir: arg(argv, '--out-dir') || 'release-evidence',
     baselineMode: argv.includes('--receipted-baseline') ? 'receipted' : argv.includes('--observed-baseline') ? 'observed' : 'verified',
     baselineReceipt: arg(argv, '--baseline-receipt'),
+    baselineRecall: arg(argv, '--baseline-recall'),
   });
   console.log(JSON.stringify({ ok: true, sourceSha: result.candidate.sourceSha,
     coverageGeneration: result.coverage.releaseCoverageGeneration, cases: result.plan.cases.length }));

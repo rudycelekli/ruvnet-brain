@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createCorpusReceipt } from '../../scripts/corpus-candidate.mjs';
 import { evaluateCorpusPromotion, parseCorpusGeneration, CORPUS_GENERATION_FIELD } from '../../scripts/corpus-promotion.mjs';
-import { fixtureReleaseRoot, sealedCorpusBundle, writeAccuracyReport } from '../helpers/corpus-seed-fixture.mjs';
+import { fixtureReleaseRoot, sealedCorpusBundle, writeAccuracyReport, writeCoverageFor } from '../helpers/corpus-seed-fixture.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const SIGN = path.join(ROOT, 'scripts/sign-bundle.mjs');
@@ -20,18 +20,31 @@ afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, f
 // deliverable artifact. The 2026-09-15 amendment adds the repo-recall report beside it — that one is
 // the measurement that actually qualified the release, so it ships for the same reason.
 const ASSET_NAMES = ['ruvnet-brain.zip', 'ruvnet-brain.zip.sig', 'ruvnet-brain.zip.sha256', 'corpus-receipt.json',
-  'ruvnet-brain.zip.accuracy.json', 'ruvnet-brain.zip.recall.json'];
+  'ruvnet-brain.zip.accuracy.json', 'ruvnet-brain.zip.recall.json', 'CORPUS-COVERAGE.json', 'coverage-receipt.json'];
 const uploaded = (names = ASSET_NAMES) => names.map((name) => ({ name, size: 10, state: 'uploaded' }));
 
 // The real gh surface the promote path touches, driven by a JSON config so each case mutates exactly
 // one fact. Every invocation is logged, so "refused BEFORE the network" is a checkable claim.
+//
+// STRICT (2026-09-29). The previous fake answered any --json field it was asked for, so it happily
+// returned `isLatest` from `gh release view` -- a field the real CLI rejects -- and the publisher's
+// final confirmation was never exercised against reality. This fake refuses every field that is not
+// in the field lists captured from the real CLI (tests/fixtures/gh-json-fields.json), exactly as
+// gh 2.101.0 does, and refuses any invocation it does not model.
 const GH_FIXTURE = `#!/usr/bin/env node
 import fs from 'node:fs';
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.GH_CALL_LOG, JSON.stringify(args) + '\\n');
 const cfg = JSON.parse(fs.readFileSync(process.env.GH_FIXTURE_CONFIG, 'utf8'));
+const known = JSON.parse(fs.readFileSync(process.env.GH_JSON_FIELDS, 'utf8'));
 const jsonAt = args.indexOf('--json');
 const fields = jsonAt >= 0 ? args[jsonAt + 1] : null;
+if (args[0] === 'release' && fields !== null) {
+  const allowed = known['release ' + args[1]] || [];
+  const unknown = fields.split(',').filter((field) => !allowed.includes(field));
+  if (unknown.length) { console.error('Unknown JSON field: "' + unknown[0] + '"'); process.exit(1); }
+}
+if (args[0] === 'release' && args[1] === 'list') { process.stdout.write(JSON.stringify(cfg.codeReleases)); process.exit(0); }
 if (args[0] === 'release' && args[1] === 'view') {
   const tagged = args[2] && !args[2].startsWith('--');
   if (!tagged) {
@@ -46,10 +59,20 @@ if (args[0] === 'release' && args[1] === 'view') {
   if (fields === 'isDraft,assets') { process.stdout.write(JSON.stringify(cfg.draftView)); process.exit(0); }
   process.stdout.write(JSON.stringify(cfg.finalView)); process.exit(0);
 }
-if (args[0] === 'release' && args[1] === 'create' && cfg.createFails) { console.error('create blew up'); process.exit(1); }
-if (args[0] === 'release' && args[1] === 'edit' && cfg.editFails) { console.error('edit blew up'); process.exit(1); }
-process.exit(0);
+if (args[0] === 'api' && /^repos\\/[^/]+\\/[^/]+\\/commits\\/v[0-9.]+$/.test(args[1] || '')) {
+  process.stdout.write(JSON.stringify({ sha: cfg.approvedSha })); process.exit(0);
+}
+if (args[0] === 'api' && /^repos\\/[^/]+\\/[^/]+\\/releases\\/latest$/.test(args[1] || '')) {
+  process.stdout.write(JSON.stringify(cfg.latestAfter)); process.exit(0);
+}
+if (args[0] === 'release' && args[1] === 'create') { if (cfg.createFails) { console.error('create blew up'); process.exit(1); } process.exit(0); }
+if (args[0] === 'release' && args[1] === 'edit') { if (cfg.editFails) { console.error('edit blew up'); process.exit(1); } process.exit(0); }
+console.error('unmodelled gh invocation: ' + args.join(' ')); process.exit(2);
 `;
+
+// The approved runtime this corpus was built at: the fixture archive's own ARCHIVE-MANIFEST releaseTag.
+const APPROVED_TAG = 'v9.9.9'; // sync-version-ignore: the non-product fixture runtime in tests/helpers/corpus-seed-fixture.mjs
+const codeRelease = (tagName) => ({ tagName, isDraft: false, isPrerelease: false });
 
 async function fixture({ sign = true, signWithAttackerKey = false, config = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'corpus-promote-'));
@@ -93,23 +116,28 @@ async function fixture({ sign = true, signWithAttackerKey = false, config = {} }
 
   const digest = receipt.archive.sha256;
   const tag = `corpus-sha256-${digest}`;
+  const coverageFile = path.join(dir, 'source-coverage.json');
+  await writeCoverageFor(receipt, coverageFile);
   const configFile = path.join(dir, 'gh-config.json');
   const resolved = {
     tagExists: false,
     latest: null,
+    codeReleases: [codeRelease(APPROVED_TAG), codeRelease('v9.9.8'), { tagName: 'v9.10.0-rc', isDraft: false, isPrerelease: true }], // sync-version-ignore: fixture code releases
+    approvedSha: HEAD,
     draftView: { isDraft: true, assets: uploaded() },
-    finalView: { tagName: tag, isDraft: false, isLatest: true, isPrerelease: false, assets: uploaded() },
+    finalView: { tagName: tag, isDraft: false, isPrerelease: false, assets: uploaded() },
+    latestAfter: { tag_name: tag },
     ...config,
   };
   fs.writeFileSync(configFile, JSON.stringify(resolved));
 
   return {
-    dir, bundle, receiptFile, receipt, digest, tag, configFile, log, resolved, releaseRoot,
+    dir, bundle, receiptFile, receipt, digest, tag, configFile, coverageFile, log, resolved, releaseRoot,
     write: (patch) => fs.writeFileSync(configFile, JSON.stringify({ ...resolved, ...patch })),
     args: [
       '--corpus-seed', '--promote-latest', '--corpus-tag', tag,
-      '--corpus-bundle', bundle, '--corpus-receipt', receiptFile,
-      '--target', HEAD, '--repo', REPO,
+      '--corpus-bundle', bundle, '--corpus-receipt', receiptFile, '--corpus-coverage', coverageFile,
+      '--target', HEAD, '--repo', REPO, '--approved-tag', APPROVED_TAG,
     ],
     env: {
       ...process.env,
@@ -121,6 +149,7 @@ async function fixture({ sign = true, signWithAttackerKey = false, config = {} }
       PATH: process.env.PATH,
       GH_CALL_LOG: log,
       GH_FIXTURE_CONFIG: configFile,
+      GH_JSON_FIELDS: path.join(ROOT, 'tests/fixtures/gh-json-fields.json'),
       RUVNET_SIGNING_PUB: pubPath,
       GITHUB_ACTIONS: 'true',
       GITHUB_WORKFLOW: 'protected-release',
@@ -155,7 +184,7 @@ describe('customer corpus promotion (ADR-086 C4 resolution S1)', () => {
     expect(observed.length).toBeGreaterThan(0);
     // And the interceptor — not the real gh — is what answered: only the fixture writes this log,
     // and only the fixture returns the exact draft/promoted views this run required to succeed.
-    expect(observed[0]).toEqual(['release', 'view', f.tag, '--json', 'tagName', '--repo', REPO]);
+    expect(observed[0]).toEqual(['release', 'list', '--repo', REPO, '--limit', '200', '--json', 'tagName,isDraft,isPrerelease']);
   });
 
   it('GREEN: publishes a complete draft, proves every asset landed, then promotes it to latest', async () => {
@@ -164,25 +193,30 @@ describe('customer corpus promotion (ADR-086 C4 resolution S1)', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     const sequence = calls(f);
     expect(sequence.map((call) => `${call[0]} ${call[1]}`)).toEqual([
+      'release list',   // publish-time re-resolve: is the approved runtime still the newest code release
+      `api repos/${REPO}/commits/${APPROVED_TAG}`, // and is the target its source commit
       'release view',   // this tag must not already exist
       'release view',   // what is releases/latest right now
       'release create', // draft, with every asset
       'release view',   // are all four assets actually uploaded
       'release edit',   // promote
       'release view',   // and prove the promoted state
+      `api repos/${REPO}/releases/latest`, // releases/latest IS this tag (isLatest is not a view field)
     ]);
+    expect(sequence[7]).toEqual(['release', 'view', f.tag, '--json', 'tagName,isDraft,isPrerelease,assets', '--repo', REPO]);
 
-    const create = sequence[2];
+    const create = sequence[4];
     // S1, verbatim: "Remove both --prerelease and --latest=false for customer corpus releases".
     expect(create).not.toContain('--prerelease');
     expect(create).not.toContain('--latest=false');
     // ASSETS COMPLETE BEFORE PROMOTION: created as a draft, which releases/latest cannot resolve to.
     expect(create).toContain('--draft');
-    expect(create.slice(-6)).toEqual([f.bundle, `${f.bundle}.sig`, `${f.bundle}.sha256`, f.receiptFile,
-      `${f.bundle}.accuracy.json`, `${f.bundle}.recall.json`]);
+    expect(create.slice(-8)).toEqual([f.bundle, `${f.bundle}.sig`, `${f.bundle}.sha256`, f.receiptFile,
+      `${f.bundle}.accuracy.json`, `${f.bundle}.recall.json`,
+      expect.stringMatching(/[\\/]CORPUS-COVERAGE\.json$/), expect.stringMatching(/[\\/]coverage-receipt\.json$/)]);
     expect(create[create.indexOf('--notes') + 1]).toContain(`${CORPUS_GENERATION_FIELD} 2026-09-13T12:00:00.000Z`);
 
-    expect(sequence[4]).toEqual(['release', 'edit', f.tag, '--repo', REPO, '--draft=false', '--latest', '--prerelease=false']);
+    expect(sequence[6]).toEqual(['release', 'edit', f.tag, '--repo', REPO, '--draft=false', '--latest', '--prerelease=false']);
     expect(JSON.parse(result.stdout).promoted).toBe(true);
   });
 
@@ -273,16 +307,66 @@ describe('customer corpus promotion (ADR-086 C4 resolution S1)', () => {
   });
 
   it.each([
-    ['still a draft', { finalView: { isDraft: true, isLatest: true, isPrerelease: false, assets: uploaded() } }],
-    ['not latest', { finalView: { tagName: 'x', isDraft: false, isLatest: false, isPrerelease: false, assets: uploaded() } }],
-    ['still a prerelease', { finalView: { isDraft: false, isLatest: true, isPrerelease: true, assets: uploaded() } }],
-    ['missing an asset after promotion', { finalView: { isDraft: false, isLatest: true, isPrerelease: false, assets: uploaded(ASSET_NAMES.slice(0, 2)) } }],
+    ['still a draft', { finalView: { isDraft: true, isPrerelease: false, assets: uploaded() } }],
+    ['not latest', { latestAfter: { tag_name: `corpus-sha256-${'d'.repeat(64)}` } }],
+    ['not latest (releases/latest unreadable)', { latestAfter: null }],
+    ['still a prerelease', { finalView: { isDraft: false, isPrerelease: true, assets: uploaded() } }],
+    ['missing an asset after promotion', { finalView: { isDraft: false, isPrerelease: false, assets: uploaded(ASSET_NAMES.slice(0, 2)) } }],
   ])('RED: refuses to report success when the promoted release is %s', async (_name, patch) => {
     const f = await fixture();
-    f.write({ ...patch, finalView: { tagName: f.tag, ...patch.finalView } });
+    const finalView = { tagName: f.tag, isDraft: false, isPrerelease: false, assets: uploaded(), ...patch.finalView };
+    f.write({ ...patch, finalView });
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/did not reach a complete, non-draft, non-prerelease latest state/);
+  });
+
+  it('SUPERSEDED: a newer code release published after the build -> exit 4, typed outcome, nothing created', async () => {
+    const f = await fixture();
+    f.write({ codeReleases: [codeRelease('v9.9.10'), codeRelease(APPROVED_TAG)] }); // sync-version-ignore: fixture code release
+    const result = run(f);
+    expect(result.status, result.stderr).toBe(4);
+    expect(JSON.parse(result.stdout.trim().split('\n').pop())).toMatchObject({ ok: false, outcome: 'superseded' });
+    expect(result.stderr).toMatch(/superseded: code release v9\.9\.10 was published after this corpus was built at v9\.9\.9/);
+    // It looked at the release list and nothing else: no create, no edit, not even a tag probe.
+    expect(calls(f).map((call) => `${call[0]} ${call[1]}`)).toEqual(['release list']);
+  });
+
+  it.each([
+    ['the approved tag is not the newest code release in the other direction', { codeReleases: [codeRelease('v9.9.8')] }, /newer than every published code release/],
+    ['no code release is listed at all', { codeReleases: [] }, /no published code release is listed/],
+    ['the target is not the approved release commit', { approvedSha: 'b'.repeat(40) }, /is not the source of the approved runtime v9\.9\.9/],
+  ])('RED: refuses (exit 1, never created) when %s', async (_name, patch, message) => {
+    const f = await fixture();
+    f.write(patch);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(message);
+    expect(calls(f).some((call) => call[1] === 'create')).toBe(false);
+  });
+
+  it('RED: a customer promotion without --approved-tag, or naming a runtime the archive does not ship, never reaches gh', async () => {
+    const f = await fixture();
+    const without = f.args.slice(0, -2);
+    expect(f.args.slice(-2)).toEqual(['--approved-tag', APPROVED_TAG]);
+    const missing = run(f, without);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toMatch(/customer promotion requires --approved-tag vX\.Y\.Z/);
+    const foreign = run(f, [...without, '--approved-tag', 'v9.9.10']); // sync-version-ignore: fixture code release
+    expect(foreign.status).toBe(1);
+    expect(foreign.stderr).toMatch(/the archive ships runtime v9\.9\.9, not the approved runtime v9\.9\.10/);
+    expect(calls(f)).toEqual([]);
+  });
+
+  it('RED: the target must be an ancestor of this run\'s GITHUB_SHA (decoupled from, never ahead of, main)', async () => {
+    const f = await fixture();
+    const parent = execFileSync('git', ['rev-parse', 'HEAD~1'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    const result = spawnSync(process.execPath, [...f.releaseRoot.nodeArgs, f.releaseRoot.release, ...f.args], {
+      cwd: ROOT, env: { ...f.env, GITHUB_SHA: parent }, encoding: 'utf8', timeout: 60_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/is not an ancestor of this run's GITHUB_SHA/);
+    expect(calls(f)).toEqual([]);
   });
 
   it('RED: bootstrap mode is unchanged — no signature required, no latest promotion', async () => {
