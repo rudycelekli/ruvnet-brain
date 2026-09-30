@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import path from 'node:path';
 import { ProgressionOutbox } from './project-progression-outbox.mjs';
 import {
   digestCanonical,
@@ -165,7 +164,9 @@ export class ProjectProgressionStore {
 
   run(args) {
     return this.runner(this.rufloBinary, args, {
-      cwd: path.dirname(this.resolution.canonicalAgentDbPath),
+      // Ruflo resolves auxiliary stores from cwd independently of the canonical --path.
+      // Starting inside .swarm would create a second .swarm beneath the project's store.
+      cwd: this.resolution.projectRoot,
       encoding: 'utf8',
       timeout: 120_000,
       env: { ...process.env, RUFLO_DAEMON_AUTOSTART: '0' },
