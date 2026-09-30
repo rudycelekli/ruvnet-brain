@@ -120,6 +120,10 @@ const STANDALONE = [
   ['self-update', 'author-run candidate rebuild; --apply is guarded by worktree-integrity.mjs and is not scheduled'],
   ['ingest-new-repos', 'author-run corpus expansion; --apply is guarded by worktree-integrity.mjs and is not scheduled'],
   ['count-chunks', 'human-run CLI — recount + restamp chunk surfaces (--check for drift); no scheduler'],
+  ['derive-passage-content-map', 'human-run maintainer tool — regenerates data/retrieval-passage-content-digests.json '
+    + 'from a corpus built with ordinal passage ids, only when the frozen fixture changes; '
+    + 'tests/unit/retrieval-passage-identity.test.mjs fails if the committed map stops matching the fixture, '
+    + 'so a stale map cannot go unnoticed and there is nothing to schedule'],
   ['brain-stamp', 'invoked by the author-run self-update.mjs candidate builder'],
   ['lesson-promote', 'human-run CLI — promotion is manual (--apply); no scheduler yet (automation is ADR-029 #4, open)'],
   ['behavioral-l1-l4', 'behavioural harness invoked by its own test file — not a product path'],
