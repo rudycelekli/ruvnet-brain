@@ -233,7 +233,10 @@ jobs:
     if: inputs.mode != 'corpus'
     needs: verified-candidate
     runs-on: ubuntu-latest
-    environment: Production – ruvnet-brain
+    # ONE owner click per release (2026-09-29): this job needs only the signing key, which the
+    # protected-branch-only `Production – corpus` environment already holds. Only `publish`, which
+    # carries NPM_TOKEN and contents:write, binds the reviewed `Production – ruvnet-brain` environment.
+    environment: Production – corpus
     permissions:
       actions: read
       contents: read
@@ -295,7 +298,10 @@ jobs:
       - name: Hand the verified payload to this run's publisher
         uses: actions/upload-artifact@v4
         with:
-          name: publisher-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          # No run_attempt in the name: `gh run rerun --failed` must find the payload the (successful,
+          # not re-run) seal job uploaded. overwrite covers a re-run of the seal job itself.
+          name: publisher-payload-${{ github.run_id }}
+          overwrite: true
           path: |
             release-evidence/payload-manifest.json
             release-evidence/payload-manifest.sig
@@ -350,7 +356,7 @@ jobs:
       - name: Restore the persisted signed payload (never rebuild or resign)
         uses: actions/download-artifact@v4
         with:
-          name: publisher-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          name: publisher-payload-${{ github.run_id }}
           path: release-evidence
 
       - name: Publish the CI-sealed candidate through the one canonical transaction
@@ -514,7 +520,10 @@ jobs:
     needs: [verified-candidate, public-verification]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: Production – ruvnet-brain
+    # ONE owner click per release (2026-09-29): this job needs only the signing key, which the
+    # protected-branch-only `Production – corpus` environment already holds. Only `publish`, which
+    # carries NPM_TOKEN and contents:write, binds the reviewed `Production – ruvnet-brain` environment.
+    environment: Production – corpus
     permissions:
       actions: read
       contents: write

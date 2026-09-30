@@ -37,9 +37,10 @@
       "owner": "session-snapshot",
       "class": "continuity capture",
       "hosts": [
-        "claude"
+        "claude",
+        "codex"
       ],
-      "responsibility": "Append one project snapshot to the canonical store and commit any outbox debt a previously interrupted session left behind."
+      "responsibility": "Append one project snapshot to the canonical store and commit any outbox debt a previously interrupted session left behind. Also records the turn's outcome (final assistant text, files changed, command descriptions — never user text) to AgentDB namespace `turns`, in the project store when it exists or the machine-wide store outside the repository; SessionEnd/PreCompact distill those records (ruflo ADR-174)."
     },
     {
       "event": "PreCompact",
@@ -153,7 +154,7 @@
       "Stop": "The 2026-09-11 probe turn never completed, so run_turn_stop_hooks had no completion to fire on. The binary declares the event and StopCommandOutputWire, so this is not-proven rather than unsupported. Stop keeps only the pre-existing continuation gate; no capture handler was added to an event whose delivery has not been seen.",
       "PreCompact": "A one-line turn never approaches a compaction threshold. The binary declares PreCompact and PreCompactCommandOutputWire. No capture handler registered."
     },
-    "consequence": "Codex captures at SessionEnd only; Stop/PreCompact remain unproven and unregistered as above (unchanged by this measurement). PreToolUse/PostToolUse are now proven for a write (apply_patch) and an MCP tool call (search_ruvnet) specifically, and decision-gate's write route plus grounding-stamp are registered on Codex accordingly (see contracts below). Bash-class tool calls (exec_command) were not exercised by this measurement and remain unregistered — extending on unexercised evidence would repeat the exact mistake this record corrects."
+    "consequence": "Codex captures at SessionEnd only; Stop/PreCompact remain unproven and unregistered as above (unchanged by this measurement). PreToolUse/PostToolUse are now proven for a write (apply_patch) and an MCP tool call (search_ruvnet) specifically, and decision-gate's write route plus grounding-stamp are registered on Codex accordingly (see contracts below). Bash-class tool calls (exec_command) were not exercised by this measurement and remain unregistered — extending on unexercised evidence would repeat the exact mistake this record corrects. Amended 2026-09-29: session-snapshot is registered on Codex Stop so each Codex turn's outcome is recorded (SessionEnd carries no last_assistant_message). Stop delivery is still NOT live-observed; the registration rests on codex-cli 0.158.0's declared stop.command.input schema and fails open."
   },
   "contracts": [
     {
@@ -196,7 +197,8 @@
       "id": "session-snapshot",
       "event": "Stop",
       "hosts": [
-        "claude"
+        "claude",
+        "codex"
       ],
       "mode": "advisory",
       "offBehavior": "run",
