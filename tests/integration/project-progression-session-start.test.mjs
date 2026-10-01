@@ -295,7 +295,7 @@ describe('ADR-073 Slice F SessionStart restore bridge', () => {
     expect(flag(list, '--path')).toBe(resolveProjectStore({ projectDir: project }).canonicalAgentDbPath);
     expect(cli.calls.filter((args) => args[1] === 'retrieve')).toHaveLength(2);
     expect(cli.calls.some((args) => args[1] === 'search')).toBe(false);
-    expect(cli.invocations.every(({ options }) => options.cwd === path.join(project, '.swarm'))).toBe(true);
+    expect(cli.invocations.every(({ options }) => options.cwd === project)).toBe(true);
   });
 
   it.each([
